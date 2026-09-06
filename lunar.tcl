@@ -7,7 +7,7 @@
 package require Tk
 
 namespace eval lunar {
-    variable version "0.56"
+    variable version "0.57"
     variable poll_ms   60000 ;# BASE cadence: re-sync about this often when OK
     variable poll_min   8000 ;# FAST floor while acquiring / re-anchoring
     variable poll_max 600000 ;# RELAXED ceiling once well disciplined (10 min)
