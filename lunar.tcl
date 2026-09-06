@@ -747,8 +747,9 @@ proc lunar::clock_face_static {c} {
 # entirely by the second hand, an UNCERTAINTY FAN (a pie sector as wide as the
 # error bound, ±boundMs -> half-angle boundMs/1000 × 6°, around a hairline
 # best-estimate centerline, always the signature red) -- or no time at all
-# (the caller clears the hands). Tk canvas has no alpha, so the fan is a solid
-# tint lowered BENEATH the face ticks; the ticks stay legible across it.
+# (the caller clears the hands). The fan is the same solid signature red as
+# the centerline -- one hand, wider when less certain -- lowered BENEATH the
+# face ticks so they stay legible across it.
 proc lunar::clock_hands {c lt milliseconds boundMs} {
     set w [winfo width $c] ; set h [winfo height $c]
     if {$w <= 1 || $h <= 1} { set w $::lunar::CLOCK_SZ ; set h $::lunar::CLOCK_SZ }
@@ -770,7 +771,7 @@ proc lunar::clock_hands {c lt milliseconds boundMs} {
                         [expr {$cx+$r}] [expr {$cy+$r}] \
                         -start [expr {90.0 - $secAng - $half}] \
                         -extent [expr {2.0*$half}] \
-                        -style pieslice -fill "#EECCCB" -outline "" -tags hand]
+                        -style pieslice -fill $::lunar::ACCENT -outline "" -tags hand]
         }
         $c lower $id     ;# beneath the face ring/ticks
     }

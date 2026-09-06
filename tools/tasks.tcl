@@ -168,7 +168,7 @@ set ::SYSLIBS {
 set ::ENGINE_SRCS {
     app_paths sysvol netutil ntp clock logbuf tz tzif tz_embed tz_winmap
     tz_winmap_gen siv nts_ke nts_ef pinned_tls cert_verify_win pin_store
-    update_check nts dns
+    update_check nts dns h2
 }
 
 # engine_prereqs -- reuse build.py's cached mbedTLS archive + version.h

@@ -20,17 +20,19 @@
 // Design
 // =============================================================================
 //
-// 1. All resolution goes through DNS-over-HTTPS (RFC 8484) -- POST over
-//    HTTP/1.1, the only HTTP this client speaks (Quad9 and Mullvad serve
-//    DoH over HTTP/2 only and are therefore not in the pool). Bootstrap
-//    is from a hardcoded table of 3 well-known resolvers, each identified
-//    by (a) a hardcoded anycast IPv4 address so we never need DNS to find
-//    the DNS, and (b) a pinned SHA-256(SPKI) of the TLS leaf certificate
-//    so a compromised CA cannot mint a trusted substitute.
+// 1. All resolution goes through DNS-over-HTTPS (RFC 8484): one POST per
+//    connection over HTTP/2 (h2.c, offered first via ALPN) or HTTP/1.1.
+//    Quad9 and Mullvad serve DoH over HTTP/2 only. Bootstrap is from a
+//    hardcoded table of 5 well-known resolvers, each identified by (a) a
+//    hardcoded anycast IPv4 address so we never need DNS to find the DNS,
+//    and (b) a pinned SHA-256(SPKI) of the TLS leaf certificate so a
+//    compromised CA cannot mint a trusted substitute.
 //
 //       cloudflare    1.1.1.1, 1.0.0.1
+//       quad9         9.9.9.9, 149.112.112.112
 //       google        8.8.8.8, 8.8.4.4
 //       nextdns       45.90.28.0
+//       mullvad       194.242.2.2
 //
 // 2. Per cache-miss we shuffle the enabled resolver pool
 //    (Fisher-Yates over the table, BCryptGenRandom) and try each

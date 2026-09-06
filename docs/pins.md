@@ -134,9 +134,8 @@ that operator family until the stored pin's window opened. Instead, for NTS endp
 
 DoH resolvers have no second slot to corroborate against inside one exchange, and the
 large operators rotate their front-end leaf keys far more often than their certificates'
-validity suggests (Google was observed rotating roughly every 19 days on 90-day leaves,
-always outside the renewal window; Mullvad did the same before it left the pool for serving
-DoH over HTTP/2 only). Hard-rejecting such a leaf until the
+validity suggests (Google and Mullvad were both observed rotating roughly every 19 days on
+90-day leaves, always outside the renewal window). Hard-rejecting such a leaf until the
 stored pin's window opened kept those resolvers dead for weeks and filled the event log with
 per-connection mismatch lines. DoH therefore corroborates a rotation over TIME instead:
 
@@ -162,7 +161,11 @@ of any kind -- records, NODATA, NXDOMAIN, even SERVFAIL -- is a resolver in serv
 AAAA lookup of an IPv4-only NTP host returns NODATA every time and must not look like a dead
 resolver). The first successful query afterwards puts it back in service; both edges are
 logged once, and a non-200 HTTP status is named in the log the first time (then hourly) so a
-resolver that only speaks HTTP/2 cannot hide behind the failure count.
+resolver that refuses the request cannot hide behind the failure count. DoH runs over HTTP/2
+when the resolver negotiates it via ALPN (Quad9 and Mullvad accept nothing else) and over
+HTTP/1.1 otherwise; a resolver whose HTTP/2 exchange fails at the protocol level is spoken
+to over HTTP/1.1 for the rest of the run, and every `resolve` line names the resolver that
+answered.
 
 ## NTS Concurrence
 

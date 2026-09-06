@@ -85,11 +85,6 @@ static D2D1_COLOR_F rgb(int r, int g, int b) {
     return c;
 }
 
-static D2D1_COLOR_F rgba(int r, int g, int b, float a) {
-    D2D1_COLOR_F c = { r / 255.0f, g / 255.0f, b / 255.0f, a };
-    return c;
-}
-
 static D2D1_POINT_2F pt(float x, float y) {
     D2D1_POINT_2F p = { x, y };
     return p;
@@ -201,19 +196,23 @@ static void draw_hand(ClockWidget *clock, ID2D1PathGeometry *geometry,
     ID2D1RenderTarget_SetTransform((ID2D1RenderTarget *)clock->target, &identity);
 }
 
-/* The uncertainty sector: the second hand drawn as wide as the error bound.
- * ±boundMs maps onto the seconds dial as a half-angle of boundMs/1000 × 6°,
- * centered on the best-estimate second.  Direct2D gives a true translucent
- * fill, so the dial stays legible through the fan.  At ±30 s the sector
- * covers the whole dial; draw a disc rather than a degenerate arc.
+/* The second hand IS the uncertainty sector: one solid red shape, drawn as
+ * wide as the error bound.  ±boundMs maps onto the seconds dial as a
+ * half-angle of boundMs/1000 × 6°, centered on the best-estimate second,
+ * and the needle drawn later along that center gives the shape a floor
+ * width, so a tight bound reads as an ordinary thin second hand and a loose
+ * one as the same hand grown wide.  The sector goes UNDER the ticks and the
+ * hour/minute hands (they stay legible by order, not by transparency); the
+ * needle goes over them like any second hand.  At ±30 s the sector covers
+ * the whole dial; draw a disc rather than a degenerate arc.
  * The display has exactly two states -- time shown (this dial, uncertainty
- * carried entirely by the fan's width) or no time -- so the fan is always
+ * carried entirely by the hand's width) or no time -- so the hand is always
  * the signature red; there is no third look. */
 static void draw_uncertainty(ClockWidget *clock, float cx, float cy,
                              float size, float seconds) {
     if (clock->boundMs <= 0) return;
     float half = (float)clock->boundMs / 1000.0f * 6.0f;
-    D2D1_COLOR_F tint = rgba(220, 50, 47, 0.20f);
+    D2D1_COLOR_F tint = rgb(220, 50, 47);   /* the needle's own colour */
     float radius = size * 0.44f;   /* same reach as the second hand's tip */
     ID2D1RenderTarget *target = (ID2D1RenderTarget *)clock->target;
 
@@ -333,7 +332,8 @@ static void draw_dial(ClockWidget *clock, float cx, float cy, float size,
     draw_hand(clock, clock->hourHand, cx, cy, hours * 30.0f, ink);
     draw_hand(clock, clock->minuteHand, cx, cy, minutes * 6.0f, ink);
 
-    /* Best-estimate centerline through the uncertainty fan. */
+    /* The needle: the best-estimate centerline of the same red sector, and
+     * the floor width of the second hand when the bound is tight. */
     D2D1_COLOR_F accent = rgb(220, 50, 47);
     D2D1_POINT_2F tip = polar(cx, cy, size * 0.44f, seconds * 6.0f);
     D2D1_POINT_2F tail = polar(cx, cy, -size * 0.08f, seconds * 6.0f);

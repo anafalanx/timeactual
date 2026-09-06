@@ -1845,6 +1845,376 @@ static void test_nts_picker_prefers_near_providers(void) {
     Nts_TestResetPicker();
 }
 
+// ---------------------------------------------------------------------------
+// HTTP/2 / HPACK (h2.c): the RFC 7541 Appendix C vectors, the canonical-code
+// invariants of the Huffman table, and scripted exchanges through
+// H2_PostOnce with a fake transport.
+// ---------------------------------------------------------------------------
+#include "../src/h2.h"
+
+// Header fields as delivered by the decoder, joined "name: value\n".
+typedef struct { char text[2048]; size_t len; int count; } HdrLog;
+static void hdrlog_add(void *ctx, const uint8_t *n, size_t nl,
+                       const uint8_t *v, size_t vl) {
+    HdrLog *h = (HdrLog *)ctx;
+    if (h->len + nl + vl + 3 >= sizeof h->text) return;
+    memcpy(h->text + h->len, n, nl); h->len += nl;
+    h->text[h->len++] = ':'; h->text[h->len++] = ' ';
+    memcpy(h->text + h->len, v, vl); h->len += vl;
+    h->text[h->len++] = '\n'; h->text[h->len] = 0;
+    h->count++;
+}
+
+static void test_hpack_integers(void) {
+    // RFC 7541 C.1: 10 in a 5-bit prefix, 1337 in a 5-bit prefix, 42 in 8.
+    uint8_t buf[8]; uint32_t v = 0; size_t used = 0;
+    CHECK_EQ_INT((int)Hpack_EncodeInt(buf, sizeof buf, 0, 5, 10), 1);
+    CHECK_EQ_INT(buf[0], 0x0A);
+    CHECK_EQ_INT((int)Hpack_EncodeInt(buf, sizeof buf, 0, 5, 1337), 3);
+    CHECK(buf[0] == 0x1F && buf[1] == 0x9A && buf[2] == 0x0A);
+    CHECK_EQ_INT(Hpack_DecodeInt(buf, 3, 5, &v, &used), 0);
+    CHECK_EQ_INT((int)v, 1337);
+    CHECK_EQ_INT((int)used, 3);
+    CHECK_EQ_INT((int)Hpack_EncodeInt(buf, sizeof buf, 0, 8, 42), 1);
+    CHECK_EQ_INT(buf[0], 42);
+    // Prefix bits survive, and a truncated continuation is rejected.
+    CHECK_EQ_INT((int)Hpack_EncodeInt(buf, sizeof buf, 0x80, 7, 200), 2);
+    CHECK(buf[0] == 0xFF && buf[1] == 73);
+    CHECK_EQ_INT(Hpack_DecodeInt(buf, 1, 7, &v, &used), -1);
+}
+
+static void test_hpack_huffman_table(void) {
+    // Kraft equality: a complete prefix code sums 2^-len to exactly 1.
+    uint64_t kraft = 0;
+    int seen_len[32] = { 0 };
+    for (int s = 0; s <= 256; s++) {
+        uint32_t code = 0; int len = 0;
+        Hpack_TestHuffmanEntry(s, &code, &len);
+        CHECK(len >= 5 && len <= 30);
+        CHECK(code < (1u << len));
+        kraft += 1ull << (30 - len);
+        seen_len[len] = 1;
+    }
+    CHECK(kraft == (1ull << 30));
+    // Canonical: within one length codes rise by one in symbol order, and
+    // the first code of the next used length continues from the last one.
+    uint32_t prev_code = 0; int prev_len = 0, first = 1;
+    for (int len = 5; len <= 30; len++) {
+        if (!seen_len[len]) continue;
+        for (int s = 0; s <= 256; s++) {
+            uint32_t code = 0; int l = 0;
+            Hpack_TestHuffmanEntry(s, &code, &l);
+            if (l != len) continue;
+            if (first) { CHECK_EQ_INT((int)code, 0); first = 0; }
+            else if (prev_len == len) { CHECK(code == prev_code + 1); }
+            else { CHECK(code == (prev_code + 1) << (len - prev_len)); }
+            prev_code = code; prev_len = len;
+        }
+    }
+}
+
+static void test_hpack_huffman_strings(void) {
+    // RFC 7541 C.4.1 / C.4.2 / C.4.3 / C.6.1 value strings.
+    static const uint8_t www[]  = { 0xf1,0xe3,0xc2,0xe5,0xf2,0x3a,0x6b,0xa0,0xab,0x90,0xf4,0xff };
+    static const uint8_t nc[]   = { 0xa8,0xeb,0x10,0x64,0x9c,0xbf };
+    static const uint8_t ck[]   = { 0x25,0xa8,0x49,0xe9,0x5b,0xa9,0x7d,0x7f };
+    static const uint8_t cv[]   = { 0x25,0xa8,0x49,0xe9,0x5b,0xb8,0xe8,0xb4,0xbf };
+    static const uint8_t s302[] = { 0x64,0x02 };
+    static const uint8_t priv[] = { 0xae,0xc3,0x77,0x1a,0x4b };
+    static const uint8_t date[] = { 0xd0,0x7a,0xbe,0x94,0x10,0x54,0xd4,0x44,0xa8,0x20,0x05,0x95,
+                                    0x04,0x0b,0x81,0x66,0xe0,0x82,0xa6,0x2d,0x1b,0xff };
+    static const uint8_t loc[]  = { 0x9d,0x29,0xad,0x17,0x18,0x63,0xc7,0x8f,0x0b,0x97,0xc8,0xe9,
+                                    0xae,0x82,0xae,0x43,0xd3 };
+    struct { const uint8_t *in; size_t n; const char *want; } cases[] = {
+        { www, sizeof www, "www.example.com" }, { nc, sizeof nc, "no-cache" },
+        { ck, sizeof ck, "custom-key" }, { cv, sizeof cv, "custom-value" },
+        { s302, sizeof s302, "302" }, { priv, sizeof priv, "private" },
+        { date, sizeof date, "Mon, 21 Oct 2013 20:13:21 GMT" },
+        { loc, sizeof loc, "https://www.example.com" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        uint8_t out[64]; size_t n = 0;
+        CHECK_EQ_INT(Hpack_HuffmanDecode(cases[i].in, cases[i].n, out, sizeof out, &n), 0);
+        CHECK(n == strlen(cases[i].want) && memcmp(out, cases[i].want, n) == 0);
+    }
+    // Padding rules: eight or more pad bits, or pad bits that are not ones.
+    static const uint8_t pad_too_long[] = { 0x64,0x02,0xff };   // "302" + 8 ones
+    static const uint8_t pad_not_ones[] = { 0x1c };             // 'a' + 100
+    uint8_t out[8]; size_t n = 0;
+    CHECK_EQ_INT(Hpack_HuffmanDecode(pad_too_long, sizeof pad_too_long, out, sizeof out, &n), -1);
+    CHECK_EQ_INT(Hpack_HuffmanDecode(pad_not_ones, sizeof pad_not_ones, out, sizeof out, &n), -1);
+}
+
+static void test_hpack_decode_blocks(void) {
+    HpackDecoder *d = (HpackDecoder *)malloc(sizeof *d);
+    CHECK(d != NULL);
+    if (!d) return;
+    HdrLog h;
+    Hpack_Init(d);
+
+    // C.3.1 -- C.3.3: literal requests, one decoder across the sequence.
+    static const uint8_t c31[] = { 0x82,0x86,0x84,0x41,0x0f,'w','w','w','.','e','x','a','m','p','l','e','.','c','o','m' };
+    static const uint8_t c32[] = { 0x82,0x86,0x84,0xbe,0x58,0x08,'n','o','-','c','a','c','h','e' };
+    static const uint8_t c33[] = { 0x82,0x87,0x85,0xbf,0x40,0x0a,'c','u','s','t','o','m','-','k','e','y',
+                                   0x0c,'c','u','s','t','o','m','-','v','a','l','u','e' };
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c31, sizeof c31, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":method: GET\n:scheme: http\n:path: /\n:authority: www.example.com\n") == 0);
+    CHECK_EQ_INT(d->count, 1);
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c32, sizeof c32, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":method: GET\n:scheme: http\n:path: /\n:authority: www.example.com\ncache-control: no-cache\n") == 0);
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c33, sizeof c33, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":method: GET\n:scheme: https\n:path: /index.html\n:authority: www.example.com\ncustom-key: custom-value\n") == 0);
+    CHECK_EQ_INT(d->count, 3);
+    CHECK_EQ_INT((int)(d->used + 32 * 3), 164);           // RFC: table size 164
+
+    // C.4.1 -- C.4.3: the same requests Huffman-coded, fresh decoder.
+    Hpack_Init(d);
+    static const uint8_t c41[] = { 0x82,0x86,0x84,0x41,0x8c,0xf1,0xe3,0xc2,0xe5,0xf2,0x3a,0x6b,0xa0,0xab,0x90,0xf4,0xff };
+    static const uint8_t c42[] = { 0x82,0x86,0x84,0xbe,0x58,0x86,0xa8,0xeb,0x10,0x64,0x9c,0xbf };
+    static const uint8_t c43[] = { 0x82,0x87,0x85,0xbf,0x40,0x88,0x25,0xa8,0x49,0xe9,0x5b,0xa9,0x7d,0x7f,
+                                   0x89,0x25,0xa8,0x49,0xe9,0x5b,0xb8,0xe8,0xb4,0xbf };
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c41, sizeof c41, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":method: GET\n:scheme: http\n:path: /\n:authority: www.example.com\n") == 0);
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c42, sizeof c42, hdrlog_add, &h), 0);
+    CHECK(strstr(h.text, "cache-control: no-cache\n") != NULL);
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c43, sizeof c43, hdrlog_add, &h), 0);
+    CHECK(strstr(h.text, "custom-key: custom-value\n") != NULL);
+    CHECK_EQ_INT(d->count, 3);
+
+    // C.5.1 -- C.5.3: responses with a 256-octet table (evictions). The
+    // blocks are plain literals, so they are spelled out as text.
+    Hpack_Init(d);
+    d->max = 256;
+    static const uint8_t c51[] = "\x48\x03" "302" "\x58\x07" "private"
+                                 "\x61\x1d" "Mon, 21 Oct 2013 20:13:21 GMT"
+                                 "\x6e\x17" "https://www.example.com";
+    static const uint8_t c52[] = "\x48\x03" "307" "\xc1\xc0\xbf";
+    static const uint8_t c53[] = "\x88\xc1" "\x61\x1d" "Mon, 21 Oct 2013 20:13:22 GMT"
+                                 "\xc0" "\x5a\x04" "gzip"
+                                 "\x77\x38" "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1";
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c51, sizeof c51 - 1, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":status: 302\ncache-control: private\ndate: Mon, 21 Oct 2013 20:13:21 GMT\nlocation: https://www.example.com\n") == 0);
+    CHECK_EQ_INT(d->count, 4);
+    CHECK_EQ_INT((int)(d->used + 32 * 4), 222);
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c52, sizeof c52 - 1, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":status: 307\ncache-control: private\ndate: Mon, 21 Oct 2013 20:13:21 GMT\nlocation: https://www.example.com\n") == 0);
+    CHECK_EQ_INT(d->count, 4);                            // 302 evicted for 307
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, c53, sizeof c53 - 1, hdrlog_add, &h), 0);
+    CHECK(strcmp(h.text, ":status: 200\ncache-control: private\ndate: Mon, 21 Oct 2013 20:13:22 GMT\nlocation: https://www.example.com\ncontent-encoding: gzip\nset-cookie: foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1\n") == 0);
+    CHECK_EQ_INT(d->count, 3);
+    CHECK_EQ_INT((int)(d->used + 32 * 3), 215);
+
+    // Malformed blocks: an index past the table, a string overrunning the
+    // block, a table-size update above the negotiated limit.
+    static const uint8_t bad_idx[] = { 0xff, 0x7f };
+    static const uint8_t bad_str[] = { 0x40, 0x05, 'a', 'b' };
+    static const uint8_t bad_upd[] = { 0x3f, 0xe2, 0x1f };             // 4097
+    Hpack_Init(d);
+    memset(&h, 0, sizeof h);
+    CHECK_EQ_INT(Hpack_Decode(d, bad_idx, sizeof bad_idx, hdrlog_add, &h), -1);
+    CHECK_EQ_INT(Hpack_Decode(d, bad_str, sizeof bad_str, hdrlog_add, &h), -1);
+    CHECK_EQ_INT(Hpack_Decode(d, bad_upd, sizeof bad_upd, hdrlog_add, &h), -1);
+    free(d);
+}
+
+// A scripted peer: reads come from `in` (optionally in tiny pieces), writes
+// are captured in `out`.
+typedef struct {
+    const uint8_t *in; size_t in_len, in_pos, max_read;
+    uint8_t out[4096]; size_t out_len;
+} FakeIo;
+static int fake_read(void *ctx, uint8_t *buf, size_t len) {
+    FakeIo *f = (FakeIo *)ctx;
+    size_t left = f->in_len - f->in_pos;
+    if (!left) return 0;
+    size_t n = len < left ? len : left;
+    if (f->max_read && n > f->max_read) n = f->max_read;
+    memcpy(buf, f->in + f->in_pos, n);
+    f->in_pos += n;
+    return (int)n;
+}
+static int fake_write(void *ctx, const uint8_t *buf, size_t len) {
+    FakeIo *f = (FakeIo *)ctx;
+    if (f->out_len + len > sizeof f->out) return -1;
+    memcpy(f->out + f->out_len, buf, len);
+    f->out_len += len;
+    return (int)len;
+}
+static size_t script_frame(uint8_t *dst, size_t cap, size_t pos, uint8_t type,
+                           uint8_t flags, uint32_t sid, const uint8_t *pl, size_t n) {
+    if (pos + 9 + n > cap) return pos;
+    dst[pos]     = (uint8_t)(n >> 16); dst[pos + 1] = (uint8_t)(n >> 8); dst[pos + 2] = (uint8_t)n;
+    dst[pos + 3] = type;               dst[pos + 4] = flags;
+    dst[pos + 5] = (uint8_t)((sid >> 24) & 0x7f); dst[pos + 6] = (uint8_t)(sid >> 16);
+    dst[pos + 7] = (uint8_t)(sid >> 8);           dst[pos + 8] = (uint8_t)sid;
+    if (n) memcpy(dst + pos + 9, pl, n);
+    return pos + 9 + n;
+}
+
+// Walk the frames the client wrote after the 24-byte preface.
+typedef struct { uint8_t type, flags; uint32_t sid; const uint8_t *pl; size_t len; } SeenFrame;
+static int walk_client_frames(const FakeIo *f, SeenFrame *out, int cap) {
+    int n = 0;
+    size_t pos = 24;
+    while (pos + 9 <= f->out_len && n < cap) {
+        const uint8_t *fh = f->out + pos;
+        size_t len = ((size_t)fh[0] << 16) | ((size_t)fh[1] << 8) | fh[2];
+        if (pos + 9 + len > f->out_len) break;
+        out[n].type = fh[3]; out[n].flags = fh[4];
+        out[n].sid = ((uint32_t)(fh[5] & 0x7f) << 24) | ((uint32_t)fh[6] << 16) |
+                     ((uint32_t)fh[7] << 8) | fh[8];
+        out[n].pl = fh + 9; out[n].len = len;
+        n++;
+        pos += 9 + len;
+    }
+    return n;
+}
+
+static void test_h2_post_once(void) {
+    // Server script: SETTINGS, PING, WINDOW_UPDATE, SETTINGS ACK, an interim
+    // 103, HEADERS(:status 200 + content-type) split over a CONTINUATION,
+    // a padded DATA frame, a final DATA with END_STREAM, then trailing junk
+    // the client must never read.
+    static uint8_t script[1024];
+    size_t sp = 0;
+    static const uint8_t srv_settings[] = { 0,3, 0,0,0,100 };
+    static const uint8_t ping[8]        = { 1,2,3,4,5,6,7,8 };
+    static const uint8_t wu[4]          = { 0,0,0x10,0 };
+    static const uint8_t h103[]         = { 0x08, 0x03, '1','0','3' };
+    static const uint8_t h200a[]        = { 0x88 };
+    static const uint8_t h200b[]        = { 0x0f, 0x10, 0x17, 'a','p','p','l','i','c','a','t','i','o','n',
+                                            '/','d','n','s','-','m','e','s','s','a','g','e' };
+    static const uint8_t d1[]           = { 3, 'h','e','l', 0,0,0 };   // PADDED: 3 pad octets
+    static const uint8_t d2[]           = { 'l','o' };
+    static const uint8_t junk[]         = { 0xde,0xad };
+    sp = script_frame(script, sizeof script, sp, 4, 0,    0, srv_settings, sizeof srv_settings);
+    sp = script_frame(script, sizeof script, sp, 6, 0,    0, ping, 8);
+    sp = script_frame(script, sizeof script, sp, 8, 0,    0, wu, 4);
+    sp = script_frame(script, sizeof script, sp, 4, 0x1,  0, NULL, 0);
+    sp = script_frame(script, sizeof script, sp, 1, 0x4,  1, h103, sizeof h103);
+    sp = script_frame(script, sizeof script, sp, 1, 0,    1, h200a, sizeof h200a);
+    sp = script_frame(script, sizeof script, sp, 9, 0x4,  1, h200b, sizeof h200b);
+    sp = script_frame(script, sizeof script, sp, 0, 0x8,  1, d1, sizeof d1);
+    sp = script_frame(script, sizeof script, sp, 0, 0x1,  1, d2, sizeof d2);
+    size_t script_end = sp;
+    sp = script_frame(script, sizeof script, sp, 0, 0x1,  1, junk, sizeof junk);
+
+    static const uint8_t body[] = "QUERY";
+    for (int pass = 0; pass < 2; pass++) {
+        FakeIo f; memset(&f, 0, sizeof f);
+        f.in = script; f.in_len = sp; f.max_read = pass ? 1 : 0;   // pass 1: byte-wise reads
+        H2Io io = { fake_read, fake_write, &f };
+        uint8_t out[64]; size_t got = 0; int status = 0;
+        CHECK_EQ_INT(H2_PostOnce(&io, "dns.example", "/dns-query", "application/dns-message",
+                                 body, 5, out, sizeof out, &got, &status), 0);
+        CHECK_EQ_INT(status, 200);
+        CHECK(got == 5 && memcmp(out, "hello", 5) == 0);
+        CHECK(f.in_pos == script_end);                 // stopped at END_STREAM
+
+        // What the client sent: preface, SETTINGS, HEADERS, DATA, then the
+        // SETTINGS ACK, the PING ACK, window updates for the padded DATA,
+        // and a GOAWAY.
+        CHECK(f.out_len > 24 && memcmp(f.out, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24) == 0);
+        SeenFrame fr[16];
+        int nf = walk_client_frames(&f, fr, 16);
+        CHECK(nf >= 7);
+        if (nf >= 7) {
+            CHECK(fr[0].type == 4 && fr[0].flags == 0 && fr[0].sid == 0 && fr[0].len == 18);
+            CHECK(fr[1].type == 1 && fr[1].flags == 0x4 && fr[1].sid == 1);
+            CHECK(fr[2].type == 0 && fr[2].flags == 0x1 && fr[2].sid == 1 &&
+                  fr[2].len == 5 && memcmp(fr[2].pl, "QUERY", 5) == 0);
+            // The request header block decodes to exactly the seven fields.
+            HpackDecoder *d = (HpackDecoder *)malloc(sizeof *d);
+            HdrLog h; memset(&h, 0, sizeof h);
+            if (d) {
+                Hpack_Init(d);
+                CHECK_EQ_INT(Hpack_Decode(d, fr[1].pl, fr[1].len, hdrlog_add, &h), 0);
+                CHECK(strcmp(h.text,
+                      ":method: POST\n:scheme: https\n:authority: dns.example\n:path: /dns-query\n"
+                      "content-type: application/dns-message\naccept: application/dns-message\n"
+                      "content-length: 5\n") == 0);
+                free(d);
+            }
+            int saw_settings_ack = 0, saw_ping_ack = 0, saw_wu = 0, saw_goaway = 0;
+            for (int i = 3; i < nf; i++) {
+                if (fr[i].type == 4 && fr[i].flags == 0x1 && fr[i].len == 0) saw_settings_ack = 1;
+                if (fr[i].type == 6 && fr[i].flags == 0x1 && fr[i].len == 8 &&
+                    memcmp(fr[i].pl, ping, 8) == 0) saw_ping_ack = 1;
+                if (fr[i].type == 8 && fr[i].len == 4) saw_wu++;
+                if (fr[i].type == 7) saw_goaway = 1;
+            }
+            CHECK(saw_settings_ack && saw_ping_ack && saw_wu == 2 && saw_goaway);
+        }
+    }
+
+    // Failure scripts: each must return -1 with an empty result.
+    struct { const char *what; uint8_t type, flags; uint32_t sid; const uint8_t *pl; size_t n; } bad[] = {
+        { "RST_STREAM on the stream", 3, 0, 1, (const uint8_t *)"\0\0\0\x8", 4 },
+        { "GOAWAY", 7, 0, 0, (const uint8_t *)"\0\0\0\0\0\0\0\0", 8 },
+        { "DATA before HEADERS", 0, 0x1, 1, d2, sizeof d2 },
+        { "PUSH_PROMISE", 5, 0x4, 1, (const uint8_t *)"\0\0\0\x2", 4 },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        uint8_t s2[256]; size_t p2 = 0;
+        p2 = script_frame(s2, sizeof s2, p2, 4, 0, 0, NULL, 0);
+        p2 = script_frame(s2, sizeof s2, p2, bad[i].type, bad[i].flags, bad[i].sid, bad[i].pl, bad[i].n);
+        FakeIo f; memset(&f, 0, sizeof f);
+        f.in = s2; f.in_len = p2;
+        H2Io io = { fake_read, fake_write, &f };
+        uint8_t out[64]; size_t got = 1; int status = 1;
+        CHECK_EQ_INT(H2_PostOnce(&io, "dns.example", "/dns-query", "application/dns-message",
+                                 body, 5, out, sizeof out, &got, &status), -1);
+        CHECK(got == 0 && status == 0);
+    }
+    // An oversized frame, a body beyond the caller's buffer, and EOF before
+    // the response completes.
+    {
+        uint8_t s2[64] = { 0x00, 0x40, 0x01, 4, 0, 0,0,0,0 };   // length 16385
+        FakeIo f; memset(&f, 0, sizeof f); f.in = s2; f.in_len = 9;
+        H2Io io = { fake_read, fake_write, &f };
+        uint8_t out[64]; size_t got = 0; int status = 0;
+        CHECK_EQ_INT(H2_PostOnce(&io, "a", "/", "t", body, 5, out, sizeof out, &got, &status), -1);
+    }
+    {
+        uint8_t s2[128]; size_t p2 = 0;
+        static const uint8_t big[20] = { 0 };
+        p2 = script_frame(s2, sizeof s2, p2, 1, 0x4, 1, h200a, sizeof h200a);
+        p2 = script_frame(s2, sizeof s2, p2, 0, 0x1, 1, big, sizeof big);
+        FakeIo f; memset(&f, 0, sizeof f); f.in = s2; f.in_len = p2;
+        H2Io io = { fake_read, fake_write, &f };
+        uint8_t out[8]; size_t got = 0; int status = 0;
+        CHECK_EQ_INT(H2_PostOnce(&io, "a", "/", "t", body, 5, out, sizeof out, &got, &status), -1);
+    }
+    {
+        uint8_t s2[128]; size_t p2 = 0;
+        p2 = script_frame(s2, sizeof s2, p2, 1, 0x4, 1, h200a, sizeof h200a);   // no DATA, no END_STREAM
+        FakeIo f; memset(&f, 0, sizeof f); f.in = s2; f.in_len = p2;
+        H2Io io = { fake_read, fake_write, &f };
+        uint8_t out[8]; size_t got = 0; int status = 0;
+        CHECK_EQ_INT(H2_PostOnce(&io, "a", "/", "t", body, 5, out, sizeof out, &got, &status), -1);
+    }
+    // A response with no body at all: HEADERS carrying END_STREAM.
+    {
+        uint8_t s2[128]; size_t p2 = 0;
+        static const uint8_t h204[] = { 0x89 };
+        p2 = script_frame(s2, sizeof s2, p2, 1, 0x5, 1, h204, sizeof h204);
+        FakeIo f; memset(&f, 0, sizeof f); f.in = s2; f.in_len = p2;
+        H2Io io = { fake_read, fake_write, &f };
+        uint8_t out[8]; size_t got = 9; int status = 0;
+        CHECK_EQ_INT(H2_PostOnce(&io, "a", "/", "t", NULL, 0, out, sizeof out, &got, &status), 0);
+        CHECK(status == 204 && got == 0);
+    }
+}
+
 static void test_logbuf_collect_wrapped(void) {
     // Overflow the ring so the overwrite-oldest branch runs and the head
     // moves: collection must stay in append order with contiguous seq,
@@ -3018,6 +3388,11 @@ int main(void) {
     test_doh_rotation_corroboration();
     test_doh_failure_backoff();
     test_nts_picker_prefers_near_providers();
+    test_hpack_integers();
+    test_hpack_huffman_table();
+    test_hpack_huffman_strings();
+    test_hpack_decode_blocks();
+    test_h2_post_once();
     test_clock_rate_clamp_scales_with_interval();
 
     test_tz_bounds();

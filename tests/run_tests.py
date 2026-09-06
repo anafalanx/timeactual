@@ -68,6 +68,7 @@ def main() -> int:
         SRC  / "update_check.c",
         SRC  / "nts.c",
         SRC  / "dns.c",
+        SRC  / "h2.c",
     ]
     # No -mwindows: we want a console main(). -Werror to catch new warnings.
     cmd = [

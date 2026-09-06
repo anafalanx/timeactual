@@ -21,6 +21,7 @@
 #include "clock.h"
 #include "pinned_tls.h"
 #include "pin_store.h"
+#include "h2.h"
 
 #include "mbedtls/ssl.h"
 
@@ -33,13 +34,12 @@
 // enrollment validates the resolver certificate through Windows/Web PKI
 // and stores the leaf SPKI in the protected local pin store.
 //
-// Every member must answer RFC 8484 POSTs over HTTP/1.1 -- the only HTTP
-// this client speaks. Quad9 (dns.quad9.net, 9.9.9.9) and Mullvad
-// (dns.mullvad.net, 194.242.2.2) are deliberately absent: both complete
-// the TLS handshake and then refuse HTTP/1.1 (Quad9 with "505 HTTP
-// Version Not Supported", Mullvad by closing without a response); they
-// serve DoH over HTTP/2 only. An entry that only ever gets as far as the
-// handshake looks healthy in the pin log while never answering a query.
+// The client speaks HTTP/2 (preferred via ALPN) and HTTP/1.1. Quad9 and
+// Mullvad serve DoH over HTTP/2 only: over HTTP/1.1 both complete the TLS
+// handshake and then refuse the request (Quad9 with "505 HTTP Version Not
+// Supported", Mullvad by closing without a response), which is why an
+// entry that only ever gets as far as the handshake must never be judged
+// healthy by its pin log lines alone -- the resolve lines say "via" whom.
 
 static const DnsResolver kResolvers[] = {
     {
@@ -50,6 +50,16 @@ static const DnsResolver kResolvers[] = {
         .ip6_secondary = "2606:4700:4700::1001",
         .label = "cloudflare",
         .operator_family = "cloudflare",
+    },
+
+    {
+        .hostname = "dns.quad9.net",
+        .ip_primary = "9.9.9.9",
+        .ip_secondary = "149.112.112.112",
+        .ip6_primary = "2620:fe::fe",
+        .ip6_secondary = "2620:fe::9",
+        .label = "quad9",
+        .operator_family = "quad9",
     },
 
     {
@@ -70,6 +80,16 @@ static const DnsResolver kResolvers[] = {
         .ip6_secondary = NULL,
         .label = "nextdns",
         .operator_family = "nextdns",
+    },
+
+    {
+        .hostname = "dns.mullvad.net",
+        .ip_primary = "194.242.2.2",
+        .ip_secondary = NULL,
+        .ip6_primary = "2a07:e340::2",
+        .ip6_secondary = NULL,
+        .label = "mullvad",
+        .operator_family = "mullvad",
     },
 };
 
@@ -159,6 +179,11 @@ static volatile LONG g_preferred_family = AF_INET;
 //    "CA validation accepted" line a pending rotation produces on every
 //    connection until it is enrolled.
 //
+//  * HTTP/2 fallback. ALPN offers h2 first; if an HTTP/2 exchange with a
+//    resolver ever fails at the protocol level, that resolver is spoken to
+//    over HTTP/1.1 for the rest of the run (logged once) rather than
+//    failing every query on a framing disagreement.
+//
 // Queries run on the worker threads, so the table sits behind its own CS.
 
 #define DOH_BACKOFF_AFTER_FAILURES     3
@@ -174,6 +199,7 @@ typedef struct {
     uint64_t lastCaLogTick;         // "CA validation accepted" rate limit
     char     lastCaSpkiHex[65];
     uint64_t lastDiagLogTick;       // non-200 HTTP status diagnostics
+    int      h2Disabled;            // an HTTP/2 exchange failed: HTTP/1.1 only
     // Rotation candidates; a slot is live while firstTick != 0. Two slots
     // so a provider whose anycast alternates between two POP keys can
     // still corroborate either of them.
@@ -342,6 +368,47 @@ static int doh_should_log_diag(const DnsResolver *r) {
     }
     LeaveCriticalSection(&g_resCs);
     return emit;
+}
+
+static int doh_h2_disabled(const DnsResolver *r) {
+    DohResolverState *st = res_state(r);
+    EnterCriticalSection(&g_resCs);
+    int off = st->h2Disabled;
+    LeaveCriticalSection(&g_resCs);
+    return off;
+}
+
+static void doh_h2_failed(const DnsResolver *r) {
+    DohResolverState *st = res_state(r);
+    int first;
+    EnterCriticalSection(&g_resCs);
+    first = !st->h2Disabled;
+    st->h2Disabled = 1;
+    LeaveCriticalSection(&g_resCs);
+    if (first) {
+        Log_Append("dns: %s HTTP/2 exchange failed; using HTTP/1.1 with it for the rest of this run",
+                   r->label);
+    }
+}
+
+// h2.c transport callbacks over the pinned TLS session.
+static int doh_h2_read(void *ctx, uint8_t *buf, size_t len) {
+    mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)ctx;
+    for (;;) {
+        int rd = mbedtls_ssl_read(ssl, buf, len);
+        if (rd == MBEDTLS_ERR_SSL_WANT_READ || rd == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (rd == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return 0;
+        return rd;
+    }
+}
+
+static int doh_h2_write(void *ctx, const uint8_t *buf, size_t len) {
+    mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)ctx;
+    for (;;) {
+        int wr = mbedtls_ssl_write(ssl, buf, len);
+        if (wr == MBEDTLS_ERR_SSL_WANT_READ || wr == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        return wr;
+    }
 }
 
 // An out-of-window, CA-valid rotation: record/advance the candidate and
@@ -917,7 +984,9 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
     // used as a rotation candidate instead of being hard-rejected until the
     // pinned certificate's own renewal window opens -- which for operators
     // that rotate early could mean weeks of a dead resolver.
-    static const char *alpn_list[] = { "http/1.1", NULL };
+    static const char *alpn_both[] = { "h2", "http/1.1", NULL };
+    static const char *alpn_h1[]   = { "http/1.1", NULL };
+    const char **alpn_list = doh_h2_disabled(r) ? alpn_h1 : alpn_both;
     PinnedTlsOpenResult openInfo;
     if (PinnedTls_OpenEnrolledSet(&tls, s, r->hostname, alpn_list,
                                   usable ? (const uint8_t (*)[32])pin_set : NULL,
@@ -981,83 +1050,106 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
     if (dns_build_query(host, qid, qtype, dns_q, sizeof dns_q, &dns_q_len) != 0)
         goto cleanup;
 
-    // HTTP POST /dns-query HTTP/1.1
-    char req_hdr[512];
-    int  hlen = _snprintf(req_hdr, sizeof req_hdr,
-        "POST /dns-query HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "Accept: application/dns-message\r\n"
-        "Content-Type: application/dns-message\r\n"
-        "Content-Length: %u\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        r->hostname, (unsigned)dns_q_len);
-    if (hlen <= 0 || (size_t)hlen >= sizeof req_hdr) goto cleanup;
-
-    {
-        size_t sent = 0;
-        while (sent < (size_t)hlen) {
-            int wr = mbedtls_ssl_write(ssl, (const unsigned char *)req_hdr + sent,
-                                       (size_t)hlen - sent);
-            if (wr == MBEDTLS_ERR_SSL_WANT_READ || wr == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-            if (wr <= 0) goto cleanup;
-            sent += (size_t)wr;
-        }
-        sent = 0;
-        while (sent < dns_q_len) {
-            int wr = mbedtls_ssl_write(ssl, dns_q + sent, dns_q_len - sent);
-            if (wr == MBEDTLS_ERR_SSL_WANT_READ || wr == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-            if (wr <= 0) goto cleanup;
-            sent += (size_t)wr;
-        }
-    }
-
-    // Drain reply.
     reply = (uint8_t *)malloc(DOH_MAX_REPLY_BYTES);
     if (!reply) goto cleanup;
-    size_t reply_len = 0;
-    for (;;) {
-        int rd = mbedtls_ssl_read(ssl, reply + reply_len,
-                                  DOH_MAX_REPLY_BYTES - reply_len);
-        if (rd == MBEDTLS_ERR_SSL_WANT_READ || rd == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        if (rd == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) break;
-        if (rd <= 0) {
-            if ((rd == MBEDTLS_ERR_SSL_CONN_EOF || rd == 0) && reply_len > 0) break;
+    const uint8_t *body = NULL;
+    size_t body_len = 0;
+
+    if (neg && strcmp(neg, "h2") == 0) {
+        // HTTP/2: one POST on stream 1 (h2.c); the body lands in `reply`.
+        H2Io io = { doh_h2_read, doh_h2_write, ssl };
+        int status = 0;
+        if (H2_PostOnce(&io, r->hostname, "/dns-query", "application/dns-message",
+                        dns_q, dns_q_len, reply, DOH_MAX_REPLY_BYTES,
+                        &body_len, &status) != 0) {
+            doh_h2_failed(r);
             goto cleanup;
         }
-        reply_len += (size_t)rd;
-        if (reply_len >= DOH_MAX_REPLY_BYTES) goto cleanup;
-    }
-
-    // Parse HTTP: status line, headers, body. We need Content-Length
-    // or Connection:close + EOF; most DoH servers do the latter so we
-    // simply locate the end of headers and take everything after.
-    if (reply_len < 16) goto cleanup;
-    if (memcmp(reply, "HTTP/1.1 200", 12) != 0 &&
-        memcmp(reply, "HTTP/1.0 200", 12) != 0) {
-        // Name the status: a server that only speaks HTTP/2 answers 505 to
-        // every query and would otherwise hide behind the failure count.
-        if (doh_should_log_diag(r)) {
-            size_t sl = 0;
-            while (sl < reply_len && sl < 48 &&
-                   reply[sl] != '\r' && reply[sl] != '\n') sl++;
-            Log_Append("dns: %s host=%s answered \"%.*s\" (not 200); counted as a resolver failure",
-                       r->label, r->hostname, (int)sl, (const char *)reply);
+        if (status != 200) {
+            if (doh_should_log_diag(r)) {
+                Log_Append("dns: %s host=%s answered HTTP/2 status %d (not 200); counted as a resolver failure",
+                           r->label, r->hostname, status);
+            }
+            goto cleanup;
         }
-        goto cleanup;
-    }
+        body = reply;
+    } else {
+        // HTTP/1.1: POST /dns-query, Connection: close, body runs to EOF.
+        char req_hdr[512];
+        int  hlen = _snprintf(req_hdr, sizeof req_hdr,
+            "POST /dns-query HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Accept: application/dns-message\r\n"
+            "Content-Type: application/dns-message\r\n"
+            "Content-Length: %u\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            r->hostname, (unsigned)dns_q_len);
+        if (hlen <= 0 || (size_t)hlen >= sizeof req_hdr) goto cleanup;
 
-    // Hand-roll a search for "\r\n\r\n"; memmem isn't in msvcrt.
-    size_t hdr_end = 0;
-    for (size_t i = 0; i + 3 < reply_len; i++) {
-        if (reply[i]=='\r' && reply[i+1]=='\n' &&
-            reply[i+2]=='\r' && reply[i+3]=='\n') {
-            hdr_end = i + 4; break;
+        {
+            size_t sent = 0;
+            while (sent < (size_t)hlen) {
+                int wr = mbedtls_ssl_write(ssl, (const unsigned char *)req_hdr + sent,
+                                           (size_t)hlen - sent);
+                if (wr == MBEDTLS_ERR_SSL_WANT_READ || wr == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+                if (wr <= 0) goto cleanup;
+                sent += (size_t)wr;
+            }
+            sent = 0;
+            while (sent < dns_q_len) {
+                int wr = mbedtls_ssl_write(ssl, dns_q + sent, dns_q_len - sent);
+                if (wr == MBEDTLS_ERR_SSL_WANT_READ || wr == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+                if (wr <= 0) goto cleanup;
+                sent += (size_t)wr;
+            }
         }
+
+        // Drain reply.
+        size_t reply_len = 0;
+        for (;;) {
+            int rd = mbedtls_ssl_read(ssl, reply + reply_len,
+                                      DOH_MAX_REPLY_BYTES - reply_len);
+            if (rd == MBEDTLS_ERR_SSL_WANT_READ || rd == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+            if (rd == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) break;
+            if (rd <= 0) {
+                if ((rd == MBEDTLS_ERR_SSL_CONN_EOF || rd == 0) && reply_len > 0) break;
+                goto cleanup;
+            }
+            reply_len += (size_t)rd;
+            if (reply_len >= DOH_MAX_REPLY_BYTES) goto cleanup;
+        }
+
+        // Parse HTTP: status line, headers, body. We need Content-Length
+        // or Connection:close + EOF; most DoH servers do the latter so we
+        // simply locate the end of headers and take everything after.
+        if (reply_len < 16) goto cleanup;
+        if (memcmp(reply, "HTTP/1.1 200", 12) != 0 &&
+            memcmp(reply, "HTTP/1.0 200", 12) != 0) {
+            // Name the status: a server that only speaks HTTP/2 answers 505 to
+            // every query and would otherwise hide behind the failure count.
+            if (doh_should_log_diag(r)) {
+                size_t sl = 0;
+                while (sl < reply_len && sl < 48 &&
+                       reply[sl] != '\r' && reply[sl] != '\n') sl++;
+                Log_Append("dns: %s host=%s answered \"%.*s\" (not 200); counted as a resolver failure",
+                           r->label, r->hostname, (int)sl, (const char *)reply);
+            }
+            goto cleanup;
+        }
+
+        // Hand-roll a search for "\r\n\r\n"; memmem isn't in msvcrt.
+        size_t hdr_end = 0;
+        for (size_t i = 0; i + 3 < reply_len; i++) {
+            if (reply[i]=='\r' && reply[i+1]=='\n' &&
+                reply[i+2]=='\r' && reply[i+3]=='\n') {
+                hdr_end = i + 4; break;
+            }
+        }
+        if (hdr_end == 0) goto cleanup;
+        body = reply + hdr_end;
+        body_len = reply_len - hdr_end;
     }
-    if (hdr_end == 0) goto cleanup;
-    const uint8_t *body = reply + hdr_end;
-    size_t body_len = reply_len - hdr_end;
     if (body_len < DNS_HDR_LEN) goto cleanup;
 
     size_t   n = 0;
