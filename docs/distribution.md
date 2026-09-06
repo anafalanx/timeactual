@@ -1,18 +1,18 @@
 # Distribution guide
 
-How Lunar gets from a working tree onto a stranger's machine without
+How Time Actual gets from a working tree onto a stranger's machine without
 SmartScreen scaring them off. Audience: whoever cuts releases.
 
 ## 1. Code signing (Authenticode)
 
 Unsigned exes get the red "Windows protected your PC" interstitial and
 poor winget/Defender treatment (an unsigned build here has tripped
-Defender's `Wacatac` ML heuristic mid-link). Every published Lunar
+Defender's `Wacatac` ML heuristic mid-link). Every published Time Actual
 binary is Authenticode-signed and RFC-3161 timestamped.
 
 ### Certum Open Source Code Signing (what we use)
 
-Lunar is signed with a **Certum Open Source Code Signing** certificate
+Time Actual is signed with a **Certum Open Source Code Signing** certificate
 through **SimplySign** — the same cloud-key setup used for the author's
 other tools (`els`, `drang`). No hardware dongle: the private key lives
 in Certum's cloud HSM and is exposed to `signtool` through SimplySign
@@ -29,7 +29,7 @@ Steps to sign a release:
 2. Sign the staged exe:
 
    ```
-   signtool sign /a /tr http://time.certum.pl /td sha256 /fd sha256 /v Lunar.exe
+   signtool sign /a /tr http://time.certum.pl /td sha256 /fd sha256 /v TimeActual.exe
    ```
 
    The `/tr … /td sha256` RFC-3161 timestamp is mandatory so the
@@ -37,7 +37,7 @@ Steps to sign a release:
 3. Verify before publishing:
 
    ```
-   signtool verify /pa /all /v Lunar.exe
+   signtool verify /pa /all /v TimeActual.exe
    ```
 
    Confirm the chain terminates at `Certum Trusted Network CA` and the
@@ -51,7 +51,7 @@ Steps to sign a release:
 ### The `sign` build task
 
 `tools/tasks.tcl sign` (aka `z sign`) runs the §1 `signtool` command on
-`dist/lunar.exe` and then verifies it with `signtool verify /pa`, so a
+`dist/TimeActual.exe` and then verifies it with `signtool verify /pa`, so a
 release sign-off is a single task. SimplySign Desktop must be connected
 first (so the cert is available to `signtool /a`). Authenticode appends
 its certificate table at the end of the file, beside the appended zipfs
@@ -66,20 +66,19 @@ confirm it still loads (status must stay `ok`).
    the embedded one (`src/tz_embed.c`) and regenerate if so.
 3. **Build**: `tclsh90.exe tools/tasks.tcl build` (needs the static
    Tcl/Tk 9 payload — see the README Build section). Produces
-   `dist/lunar.exe`.
+   `dist/TimeActual.exe`.
 4. **Test**: `python tests/run_tests.py` (C engine unit tests) and
    `tclsh90.exe tools/tasks.tcl check` (headless self-test of the built
    exe). Both must be green — CI must also be green on the release commit.
 5. **Sign + verify**: connect SimplySign, then `tclsh90.exe
    tools/tasks.tcl sign` (or the §1 `signtool` command) on
-   `dist/lunar.exe`, and verify it. Note the printed SHA-256 of the
+   `dist/TimeActual.exe`, and verify it. Note the printed SHA-256 of the
    signed exe.
 6. **GitHub Release**: tag `vX.Y` (matching VERSION), upload the signed
-   exe as the release asset **cased as `Lunar.exe`** (the build emits
-   lowercase `dist/lunar.exe`; stage a correctly-cased copy —
-   `cp dist/lunar.exe stage/Lunar.exe` — because the download URL is
-   case-sensitive and winget/update expect `Lunar.exe`), and paste its
-   SHA-256 into the notes. Lunar ships as a single self-contained exe —
+   exe as the release asset **`TimeActual.exe`** (the build already emits
+   that exact casing as `dist/TimeActual.exe`; the download URL is
+   case-sensitive, so keep it), and paste its
+   SHA-256 into the notes. Time Actual ships as a single self-contained exe —
    the exe *is* the artifact, no installer or archive required.
 7. **Round-trip**: download the published asset, re-run
    `signtool verify /pa /all /v` and compare SHA-256 against the notes.
@@ -91,7 +90,7 @@ confirm it still loads (status must stay `ok`).
 
 ## 3. Updates and deferred scope
 
-- **Passive update check (shipped).** Lunar notices when a newer release
+- **Passive update check (shipped).** Time Actual notices when a newer release
   exists by querying the GitHub Releases API over its *own* hardened,
   CA-validated stack (pinned DoH + mbedTLS, no external process) and
   surfaces a notice that links to the release page. It downloads and

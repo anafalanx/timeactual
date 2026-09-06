@@ -56,7 +56,7 @@ namespace eval lunar {
 # One store carries both log domains: UI-side events (appended directly via
 # lunar::event) and the C engine's in-memory ring (drained incrementally via
 # ::lunar::log_events). Every event is {wallMs trusted sev cat msg}. The
-# store persists to %APPDATA%\Lunar\events.log -- one Tcl list per line, so
+# store persists to %APPDATA%\TimeActual\events.log -- one Tcl list per line, so
 # arbitrary message text round-trips exactly -- rotating to events.log.1 at
 # events_file_max (4 MiB; the audit.log precedent: bounded disk, no
 # daemon). The in-memory tail (last events_mem_max) is what the Event Log
@@ -66,7 +66,15 @@ namespace eval lunar {
 # no budget for a Tcl drain).
 proc lunar::datadir {} {
     if {[info exists ::env(LUNAR_DATA_DIR)] && $::env(LUNAR_DATA_DIR) ne ""} { return $::env(LUNAR_DATA_DIR) }
-    if {[info exists ::env(APPDATA)] && $::env(APPDATA) ne ""} { return [file join $::env(APPDATA) Lunar] }
+    if {[info exists ::env(APPDATA)] && $::env(APPDATA) ne ""} {
+        set new [file join $::env(APPDATA) TimeActual]
+        set old [file join $::env(APPDATA) Lunar]
+        # The product was Lunar before 0.58: rename its folder once so pins,
+        # settings and logs carry over (the engine's app_paths.c makes the
+        # same check; whichever runs first does the move).
+        if {![file exists $new] && [file isdirectory $old]} { catch { file rename $old $new } }
+        return $new
+    }
     return [pwd]
 }
 proc lunar::events_path {} { return [file join [lunar::datadir] events.log] }
@@ -313,14 +321,19 @@ proc lunar::bgerror {msg args} {
 }
 
 # ---- look: els's visual identity --------------------------------------------
-set ::lunar::PAGE   "#F2F2F2"   ;# calm grey page
-set ::lunar::INK    "#1A1A1A"   ;# near-black ink
-set ::lunar::ACCENT "#DC322F"   ;# signature red
-set ::lunar::MUTED  "#6B7177"   ;# muted slate (chrome text)
-set ::lunar::CHROME "#E9E9E9"   ;# flat chrome (status bar)
+# The palette is that of the flag of Neutral Moresnet -- black, white and
+# its blue (#0F47AF, as the Wikimedia Commons flag file draws it) -- with
+# grey for whatever must recede. No other hue anywhere in the shell; the
+# dial widget (lunarclock.c) and the icon (tools/icon.tcl) use the same
+# three values.
+set ::lunar::PAGE   "#FFFFFF"   ;# white page
+set ::lunar::INK    "#000000"   ;# black ink
+set ::lunar::ACCENT "#0F47AF"   ;# the flag's blue: second hand, armed marks, alerts
+set ::lunar::MUTED  "#6E6E6E"   ;# grey (chrome text, minute ticks)
+set ::lunar::CHROME "#EDEDED"   ;# flat grey chrome (status bar)
 set ::lunar::HAIR   "#D4D4D4"   ;# hairline separators
-set ::lunar::OK     "#2E7D32"   ;# trusted (green)
-set ::lunar::WARN   "#B8860B"   ;# holdover/degraded (amber)
+set ::lunar::OK     "#000000"   ;# trusted: plain ink, the settled state
+set ::lunar::WARN   "#555555"   ;# holdover/reacquiring: a shade less sure
 set ::lunar::CLOCK_SZ 440       ;# analog face canvas size (square, px)
 
 option add *tearOff 0
@@ -348,8 +361,8 @@ proc lunar::init_style {} {
     $s configure TEntry -relief flat -borderwidth 1 -padding {6 4} \
         -fieldbackground $::lunar::PAGE -foreground $ink -insertcolor $ink \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
-    $s map TEntry -bordercolor [list focus "#A6ACB4"] \
-        -lightcolor [list focus "#A6ACB4"] -darkcolor [list focus "#A6ACB4"]
+    $s map TEntry -bordercolor [list focus "#A0A0A0"] \
+        -lightcolor [list focus "#A0A0A0"] -darkcolor [list focus "#A0A0A0"]
     # dialog buttons read as buttons even before hover (els Dialog.TButton)
     $s configure Dialog.TButton -background $::lunar::PAGE -foreground $ink \
         -borderwidth 1 -relief solid -padding {10 5} -anchor center \
@@ -401,8 +414,8 @@ proc lunar::init_style {} {
         -background $::lunar::PAGE -foreground $ink -arrowcolor $::lunar::MUTED \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair \
         -padding {6 3} -relief flat -borderwidth 1
-    $s map TCombobox -bordercolor [list focus "#A6ACB4"] \
-        -lightcolor [list focus "#A6ACB4"] -darkcolor [list focus "#A6ACB4"] \
+    $s map TCombobox -bordercolor [list focus "#A0A0A0"] \
+        -lightcolor [list focus "#A0A0A0"] -darkcolor [list focus "#A0A0A0"] \
         -fieldbackground [list readonly $::lunar::PAGE] \
         -background [list readonly $::lunar::PAGE]
     option add *TCombobox*Listbox.background $::lunar::PAGE
@@ -443,7 +456,7 @@ proc lunar::fmt_delta {ms} {
 }
 
 # ---- settings (same file + format + semantics as the Win32 shell) -----------
-# %APPDATA%\Lunar\settings.dat, one key=value per line. Keys this shell does
+# %APPDATA%\TimeActual\settings.dat, one key=value per line. Keys this shell does
 # not own (legacy tray, and any future keys) are preserved verbatim so the
 # two shells can be swapped without losing anything. The PRESENCE of the tz=
 # key -- even empty, meaning explicit UTC -- counts as a deliberate choice;
@@ -764,7 +777,7 @@ proc lunar::clock_hands {c lt milliseconds boundMs} {
         if {$half >= 180.0} {
             set id [$c create oval [expr {$cx-$r}] [expr {$cy-$r}] \
                         [expr {$cx+$r}] [expr {$cy+$r}] \
-                        -fill "#EECCCB" -outline "" -tags hand]
+                        -fill $::lunar::ACCENT -outline "" -tags hand]
         } else {
             set secAng [expr {$s/60.0*360}]
             set id [$c create arc [expr {$cx-$r}] [expr {$cy-$r}] \
@@ -926,7 +939,7 @@ proc lunar::force_square_window {} {
 
 # ---- the dashboard ----------------------------------------------------------
 proc lunar::build {} {
-    wm title . "Lunar $::lunar::version"
+    wm title . "Time Actual $::lunar::version"
     # force_square_window below adjusts Tk's own client geometry so that the
     # actual Windows frame is square, including status/title chrome.
     wm geometry . 510x510
@@ -934,7 +947,18 @@ proc lunar::build {} {
     wm resizable . 1 1
     lunar::init_style
     . configure -background $::lunar::PAGE
-    catch { wm iconphoto . -default [image create photo -file [file join [file dirname [info script]] resources icon.png]] }
+    # Window icon: the sizes `z icon` renders, so the title bar gets a real
+    # 16 px image and the taskbar a real 32 px one instead of a scaled 256.
+    catch {
+        set rd [file join [file dirname [info script]] resources]
+        set imgs {}
+        foreach s {16 24 32 48 256} {
+            set f [file join $rd icon-$s.png]
+            if {[file exists $f]} { lappend imgs [image create photo -file $f] }
+        }
+        if {![llength $imgs]} { lappend imgs [image create photo -file [file join $rd icon.png]] }
+        wm iconphoto . -default {*}$imgs
+    }
 
     # Keep the power-user shortcuts, but leave the clock itself free of a
     # desktop-style menu bar. All discoverable controls live behind the
@@ -1055,7 +1079,7 @@ proc lunar::log_dlg {} {
     if {[winfo exists .log]} { raise .log ; focus .log ; lunar::log_refresh ; return }
     set P $::lunar::PAGE
     toplevel .log -bg $P
-    wm title .log "Lunar — Event Log"
+    wm title .log "Time Actual — Event Log"
     wm transient .log .
     set ::lunar::log_sort {time 0}
     # generous default -- roomy message column, ~26 rows -- and resizable;
@@ -1165,7 +1189,7 @@ proc lunar::log_panel {parent targetW targetH} {
             -command [list lunar::log_sortby $c]
     }
     $parent.f.tv tag configure error -foreground $::lunar::ACCENT
-    $parent.f.tv tag configure warn  -foreground $::lunar::WARN
+    $parent.f.tv tag configure warn  -foreground $::lunar::INK -background "#E6E6E6"
     ttk::scrollbar $parent.f.vs -orient vertical   -command [list $parent.f.tv yview]
     ttk::scrollbar $parent.f.hs -orient horizontal -command [list $parent.f.tv xview]
     grid $parent.f.tv -row 0 -column 0 -sticky nsew
@@ -1422,7 +1446,7 @@ proc lunar::settings_dlg {{tab ""}} {
     set M $::lunar::MUTED
     toplevel .set -bg $P
     wm withdraw .set
-    wm title .set "Lunar Settings"
+    wm title .set "Time Actual Settings"
     wm transient .set .
     wm resizable .set 0 0
 
@@ -1534,13 +1558,13 @@ proc lunar::settings_dlg {{tab ""}} {
     label $c.bhdr -bg $P -fg $I -font lunarUIb -anchor w -text "Window and startup"
     checkbutton $c.ontop -bg $P -fg $I -font lunarUI -anchor w \
         -activebackground $P -selectcolor $P \
-        -text "Keep Lunar above other windows" -variable ::lunar::set_ontop
+        -text "Keep Time Actual above other windows" -variable ::lunar::set_ontop
     checkbutton $c.confirm -bg $P -fg $I -font lunarUI -anchor w \
         -activebackground $P -selectcolor $P \
         -text "Confirm before closing" -variable ::lunar::set_confirm
     checkbutton $c.startup -bg $P -fg $I -font lunarUI -anchor w \
         -activebackground $P -selectcolor $P \
-        -text "Start Lunar when I sign in" -variable ::lunar::set_startup
+        -text "Start Time Actual when I sign in" -variable ::lunar::set_startup
     frame $c.rule1 -bg $::lunar::HAIR -height 1
     label $c.uhdr -bg $P -fg $I -font lunarUIb -anchor w -text "Diagnostics"
     frame $c.actions -bg $P
@@ -1553,7 +1577,7 @@ proc lunar::settings_dlg {{tab ""}} {
     set about [dict create version $::lunar::version tzdata unknown]
     if {[llength [info commands ::lunar::about]]} { catch { set about [::lunar::about] } }
     label $c.abouttitle -bg $P -fg $I -font lunarUIb -anchor w \
-        -text "Lunar [dict get $about version]"
+        -text "Time Actual [dict get $about version]"
     label $c.aboutbody -bg $P -fg $M -font lunarUI -anchor w -justify left \
         -text "An analog clock disciplined by authenticated network time.\nEmbedded IANA time-zone data: [dict get $about tzdata]  ·  MIT License"
     ttk::button $c.quit -style Dialog.TButton -text "Quit Lunar" -command lunar::quit
@@ -1853,7 +1877,7 @@ proc lunar::window_event {kind} {
 proc lunar::quit {} {
     if {[dict get $::lunar::cfg confirm]} {
         set answer [tk_messageBox -parent . -type yesno -default yes \
-            -icon question -title "Lunar" -message "Close Lunar?"]
+            -icon question -title "Time Actual" -message "Close Time Actual?"]
         if {$answer ne "yes"} return
     }
     catch { if {[llength [info commands ::lunar::shutdown]]} { ::lunar::shutdown } }
@@ -2237,7 +2261,7 @@ proc lunar::main {} {
     # Event store: session marker now; history merge-load off the paint
     # path (after idle still beats the first 1 s drain tick, and boot-time
     # events ingested before it are merged, not clobbered).
-    lunar::ev info app "session start (Lunar $::lunar::version)"
+    lunar::ev info app "session start (Time Actual $::lunar::version)"
     after idle lunar::events_load
     after 1000 lunar::events_drain_loop
     after 100 lunar::tick

@@ -1,6 +1,6 @@
-# Lunar Pin Enrollment
+# Time Actual Pin Enrollment
 
-Lunar no longer ships provider cryptographic material in `Lunar.exe`.
+Time Actual no longer ships provider cryptographic material in `TimeActual.exe`.
 The executable contains endpoint metadata only: host names, bootstrap IPs for DoH,
 labels, ports, and operator-family names. The trust data needed for DoH and NTS is
 created locally on first use.
@@ -9,13 +9,13 @@ created locally on first use.
 
 First run, renewal, and expired-pin recovery use the Windows Web PKI:
 
-1. Lunar opens TLS 1.3 to the configured DoH resolver or NTS-KE server.
+1. Time Actual opens TLS 1.3 to the configured DoH resolver or NTS-KE server.
 2. mbedTLS performs the TLS transport with certificate verification disabled inside mbedTLS.
-3. Lunar passes the peer certificate chain to Windows certificate-chain APIs.
+3. Time Actual passes the peer certificate chain to Windows certificate-chain APIs.
 4. Windows builds a server-auth chain from the current machine/user certificate stores.
 5. Windows applies hostname validation with `CERT_CHAIN_POLICY_SSL`.
-6. Lunar hashes the validated leaf certificate's SubjectPublicKeyInfo (SPKI) with SHA-256.
-7. Lunar stores that SPKI digest locally as a continuity pin for the endpoint.
+6. Time Actual hashes the validated leaf certificate's SubjectPublicKeyInfo (SPKI) with SHA-256.
+7. Time Actual stores that SPKI digest locally as a continuity pin for the endpoint.
 
 ## Multi-SPKI Sets
 
@@ -33,19 +33,19 @@ roaming laptop would otherwise flap between "pinned" and "mismatch" as it change
 
 After enrollment, ordinary operation is pin-first. If the leaf matches the set, the TLS
 connection is accepted without needing a fresh CA decision. When the newest pin reaches its
-renewal window, Lunar keeps accepting still-matching pins while it attempts a fresh Windows
+renewal window, Time Actual keeps accepting still-matching pins while it attempts a fresh Windows
 CA validation. If every stored pin has passed its certificate `notAfter` time, the set is no
-longer usable by itself; Lunar must obtain a fresh Windows CA validation or the endpoint
+longer usable by itself; Time Actual must obtain a fresh Windows CA validation or the endpoint
 fails closed.
 
-External network failures can therefore cause INOP, but they cannot force Lunar to replace
+External network failures can therefore cause INOP, but they cannot force Time Actual to replace
 a valid local pin outside the renewal/expiry path. For NTS endpoints, a pin mismatch before
 renewal is no longer an unconditional hard reject; see "Corroborated Rotation Acceptance"
 below. A mismatch that also fails Windows CA validation is always rejected.
 
 ## Local Storage
 
-Pins are stored in `%APPDATA%\Lunar\pins.dat`.
+Pins are stored in `%APPDATA%\TimeActual\pins.dat`.
 
 The plaintext format is line-oriented, version 2 (`LUNAR_PINSTORE|2`): one record line per
 enrolled SPKI, where repeated endpoint keys accumulate into that endpoint's SPKI set in
@@ -54,21 +54,21 @@ single-entry sets and are upgraded to version 2 on the next write.
 
 The file is plaintext only inside the process. On disk it is protected with Windows DPAPI
 via `CryptProtectData` / `CryptUnprotectData`, using the current user's Windows profile as
-the cryptographic protection boundary. Lunar writes through a temporary file, flushes it,
+the cryptographic protection boundary. Time Actual writes through a temporary file, flushes it,
 and atomically replaces the old cache with `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)`.
 
-After each write, Lunar applies a protected DACL that grants access to the current user and
+After each write, Time Actual applies a protected DACL that grants access to the current user and
 SYSTEM. This blocks accidental edits and ordinary cross-user tampering.
 
 Important limitation: Windows DPAPI cannot prove that only this exact executable is reading
 the file. Code already running as the same Windows user can usually call the same DPAPI
-unprotect operation. Lunar's local storage protects against accidental edits, casual local
+unprotect operation. Time Actual's local storage protects against accidental edits, casual local
 tampering, and other users on the same machine; it is not a same-user arbitrary-code
 execution boundary.
 
 ## Renewal Policy
 
-Lunar stores certificate validity metadata next to each SPKI digest:
+Time Actual stores certificate validity metadata next to each SPKI digest:
 
 - endpoint kind: DoH or NTS
 - endpoint label, host, port, and operator family
@@ -91,7 +91,7 @@ the pin-store log line for every save.
 During the renewal window, a matching pin can continue to authenticate the endpoint while
 CA renewal is attempted. After every stored pin's `notAfter`, CA validation is mandatory.
 
-If CA validation succeeds, Lunar saves the observed leaf SPKI into the endpoint's set with
+If CA validation succeeds, Time Actual saves the observed leaf SPKI into the endpoint's set with
 one of these statuses:
 
 - `first-run-enrollment`
@@ -111,7 +111,7 @@ that operator family until the stored pin's window opened. Instead, for NTS endp
 
 1. The presented leaf matches no stored, un-expired SPKI and the endpoint is not in its
    renewal window.
-2. Lunar runs the full Windows CA + hostname validation path anyway. If that fails, the
+2. Time Actual runs the full Windows CA + hostname validation path anyway. If that fails, the
    connection is rejected as before.
 3. If CA validation passes, the NTS exchange completes, but the sample is marked with the
    `ROTATED_PIN` auth mode and the new SPKI is NOT persisted yet.
@@ -141,7 +141,7 @@ per-connection mismatch lines. DoH therefore corroborates a rotation over TIME i
 
 1. The presented leaf matches no stored, un-expired SPKI and the endpoint is not in its
    renewal window.
-2. Lunar runs the full Windows CA + hostname validation path. If that fails, the connection
+2. Time Actual runs the full Windows CA + hostname validation path. If that fails, the connection
    is rejected as before (`CA validation rejected`).
 3. If CA validation passes, the answers from this connection ARE used (DNS answers are not
    trusted anyway: every NTS-KE handshake authenticates the address it resolves to), but the
@@ -169,7 +169,7 @@ answered.
 
 ## NTS Concurrence
 
-Because first-run trust now depends on maintained public CA infrastructure, Lunar does not
+Because first-run trust now depends on maintained public CA infrastructure, Time Actual does not
 allow a single NTS source to anchor the clock. A trusted cycle requires both NTS slots to
 succeed, both to be pin-authenticated (enrolled pins, or at most ONE pending-rotation
 sample riding on a continuous enrolled peer), and the two NTS providers to come from
@@ -182,7 +182,7 @@ unauthenticated core cluster can only *widen* it, never sustain a claim (see `sr
 
 ## Logging
 
-Lunar logs the enrollment path in detail:
+Time Actual logs the enrollment path in detail:
 
 - missing, expired, matching, mismatching, and renewal-due local pin states
 - loaded, saved, and used pin records with recorded validity windows, set sizes, the
@@ -197,6 +197,6 @@ Lunar logs the enrollment path in detail:
 - NTP cycle gates, including the two-operator NTS requirement
 
 Revocation checking is requested. If Windows reports only offline or unknown revocation
-status, Lunar records that fact and retries the chain build without revocation so that a
+status, Time Actual records that fact and retries the chain build without revocation so that a
 temporary responder outage does not permanently brick first-run enrollment. Hard chain or
 hostname policy errors still fail the enrollment.

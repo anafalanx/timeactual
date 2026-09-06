@@ -16,7 +16,7 @@ int Lunar_AppDataPathW(wchar_t *out, size_t out_len,
     wchar_t dir[MAX_PATH] = { 0 };
 
     // LUNAR_DATA_DIR, when set and non-empty, replaces the default
-    // %APPDATA%\Lunar base directory entirely. Tests use this to
+    // %APPDATA%\TimeActual base directory entirely. Tests use this to
     // redirect persistence away from the real user profile.
     DWORD got = GetEnvironmentVariableW(L"LUNAR_DATA_DIR", dir, MAX_PATH);
     if (got >= MAX_PATH) return 0;   // set but too long: fail, don't fall back
@@ -25,8 +25,21 @@ int Lunar_AppDataPathW(wchar_t *out, size_t out_len,
         got = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
         if (got == 0 || got >= MAX_PATH) return 0;
 
-        if (_snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%ls\\Lunar", appdata) < 0) {
+        if (_snwprintf_s(dir, MAX_PATH, _TRUNCATE, L"%ls\\TimeActual", appdata) < 0) {
             return 0;
+        }
+        // The product was called Lunar before 0.58: carry a user's pins,
+        // settings and logs across by renaming the old folder once. The
+        // shell (lunar.tcl) makes the same check; whichever runs first
+        // does the move and the other finds it done.
+        if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) {
+            wchar_t legacy[MAX_PATH] = { 0 };
+            if (_snwprintf_s(legacy, MAX_PATH, _TRUNCATE, L"%ls\\Lunar", appdata) >= 0) {
+                DWORD la = GetFileAttributesW(legacy);
+                if (la != INVALID_FILE_ATTRIBUTES && (la & FILE_ATTRIBUTE_DIRECTORY)) {
+                    MoveFileExW(legacy, dir, 0);   // best effort; a fresh dir follows if it fails
+                }
+            }
         }
     }
 

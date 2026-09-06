@@ -270,7 +270,7 @@ static void test_clock_discipline(void) {
 
     // Kill any stale discipline file from a previous run.
     wchar_t discPath[MAX_PATH];
-    _snwprintf(discPath, MAX_PATH, L"%ls\\Lunar\\discipline.dat", scratchW);
+    _snwprintf(discPath, MAX_PATH, L"%ls\\TimeActual\\discipline.dat", scratchW);
     _wremove(discPath);
 
     Clock_Init();
@@ -454,7 +454,7 @@ static void clock_test_reset_appdata(void) {
     _snwprintf(envsetW, MAX_PATH + 48, L"APPDATA=%ls", scratchW);
     _wputenv(envsetW);
     wchar_t discPath[MAX_PATH];
-    _snwprintf(discPath, MAX_PATH, L"%ls\\Lunar\\discipline.dat", scratchW);
+    _snwprintf(discPath, MAX_PATH, L"%ls\\TimeActual\\discipline.dat", scratchW);
     _wremove(discPath);
 }
 
@@ -2811,7 +2811,7 @@ static void test_pin_store_roundtrip(void) {
     CHECK_EQ_STR(rec.spkis[0].spki_hex, hex);
 
     wchar_t pinsPath[MAX_PATH];
-    _snwprintf_s(pinsPath, MAX_PATH, _TRUNCATE, L"%ls\\Lunar\\pins.dat", tempAppData);
+    _snwprintf_s(pinsPath, MAX_PATH, _TRUNCATE, L"%ls\\TimeActual\\pins.dat", tempAppData);
     CHECK(GetFileAttributesW(pinsPath) != INVALID_FILE_ATTRIBUTES);
 
     PinStore_TestReset();
@@ -2819,7 +2819,7 @@ static void test_pin_store_roundtrip(void) {
     else SetEnvironmentVariableW(L"APPDATA", NULL);
     DeleteFileW(pinsPath);
     wchar_t lunarDir[MAX_PATH];
-    _snwprintf_s(lunarDir, MAX_PATH, _TRUNCATE, L"%ls\\Lunar", tempAppData);
+    _snwprintf_s(lunarDir, MAX_PATH, _TRUNCATE, L"%ls\\TimeActual", tempAppData);
     RemoveDirectoryW(lunarDir);
     RemoveDirectoryW(tempAppData);
 }
@@ -3288,13 +3288,44 @@ static void test_app_data_path(void) {
 
     CHECK_EQ_INT(Lunar_AppDataPathW(dir, MAX_PATH, NULL), 1);
     CHECK(dir[0] != 0);
-    CHECK(wcsstr(dir, L"\\Lunar") != NULL);
+    CHECK(wcsstr(dir, L"\\TimeActual") != NULL);
 
     CHECK_EQ_INT(Lunar_AppDataPathW(file, MAX_PATH, L"unit-test.dat"), 1);
-    CHECK(wcsstr(file, L"\\Lunar\\unit-test.dat") != NULL);
+    CHECK(wcsstr(file, L"\\TimeActual\\unit-test.dat") != NULL);
 
     CHECK_EQ_INT(Lunar_AppDataPathW(tiny, 4, L"unit-test.dat"), 0);
     CHECK_EQ_INT(tiny[0], 0);
+
+    // The pre-0.58 folder (%APPDATA%\Lunar) is renamed to the new one on
+    // first contact, so pins, settings and logs survive the product rename.
+    {
+        wchar_t cwd[MAX_PATH]; GetCurrentDirectoryW(MAX_PATH, cwd);
+        wchar_t base[MAX_PATH + 32], oldDir[MAX_PATH + 48], newDir[MAX_PATH + 48],
+                marker[MAX_PATH + 64], moved[MAX_PATH + 64], envset[MAX_PATH + 64];
+        _snwprintf(base, MAX_PATH + 32, L"%ls\\build\\test_scratch_migr", cwd);
+        _snwprintf(oldDir, MAX_PATH + 48, L"%ls\\Lunar", base);
+        _snwprintf(newDir, MAX_PATH + 48, L"%ls\\TimeActual", base);
+        _snwprintf(marker, MAX_PATH + 64, L"%ls\\marker.dat", oldDir);
+        _snwprintf(moved,  MAX_PATH + 64, L"%ls\\marker.dat", newDir);
+        _wremove(moved); _wrmdir(newDir); _wremove(marker); _wrmdir(oldDir);
+        _wmkdir(base); _wmkdir(oldDir);
+        FILE *mf = _wfopen(marker, L"wb");
+        CHECK(mf != NULL);
+        if (mf) { fputs("legacy", mf); fclose(mf); }
+        _snwprintf(envset, MAX_PATH + 64, L"APPDATA=%ls", base);
+        _wputenv(envset);
+        SetEnvironmentVariableW(L"LUNAR_DATA_DIR", NULL);
+
+        wchar_t got[MAX_PATH] = { 0 };
+        CHECK_EQ_INT(Lunar_AppDataPathW(got, MAX_PATH, L"marker.dat"), 1);
+        CHECK(wcscmp(got, moved) == 0);
+        CHECK(GetFileAttributesW(moved) != INVALID_FILE_ATTRIBUTES);      // carried across
+        CHECK(GetFileAttributesW(oldDir) == INVALID_FILE_ATTRIBUTES);     // old folder gone
+        // A second call finds the new folder and leaves everything alone.
+        CHECK_EQ_INT(Lunar_AppDataPathW(got, MAX_PATH, L"marker.dat"), 1);
+        CHECK(GetFileAttributesW(moved) != INVALID_FILE_ATTRIBUTES);
+        _wremove(moved); _wrmdir(newDir); _wrmdir(base);
+    }
 }
 
 // ---------------------------------------------------------------------------

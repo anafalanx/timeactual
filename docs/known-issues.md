@@ -28,13 +28,13 @@ Ranked roughly by time-urgency / severity.
 
 The previous design shipped hardcoded SHA-256 SPKI pins for NTS and DoH leaf
 certificates. That created a scheduled outage: when providers rotated keys,
-Lunar would reject them until a new binary was built and deployed.
+Time Actual would reject them until a new binary was built and deployed.
 
 The current implementation removes provider cryptographic material from the
 executable. `src/nts.c` and `src/dns.c` now contain endpoint metadata only.
-On first run, renewal, or expired-pin recovery, Lunar validates the endpoint
+On first run, renewal, or expired-pin recovery, Time Actual validates the endpoint
 through Windows certificate-chain and hostname policy APIs, captures the leaf
-SPKI SHA-256, and stores it in `%APPDATA%\Lunar\pins.dat` protected by DPAPI
+SPKI SHA-256, and stores it in `%APPDATA%\TimeActual\pins.dat` protected by DPAPI
 and a strict current-user/SYSTEM ACL. See `docs/pins.md`.
 
 The NTS concurrence gate was also tightened: a trusted cycle now requires two
@@ -151,7 +151,7 @@ confident-looking dial that is actually unverified.
 **Severity: Low**
 
 The persisted discipline rate is stored as plaintext in
-`%APPDATA%\Lunar\discipline.dat`. Any process running as the same Windows
+`%APPDATA%\TimeActual\discipline.dat`. Any process running as the same Windows
 user can modify or replace it. The ±200 ppm absolute clamp and the
 interval-scaled per-cycle change clamp (at most ±20 ppm) limit the damage, and re-verification happens
 on the first successful NTP sync. So the worst-case outcome is a brief period

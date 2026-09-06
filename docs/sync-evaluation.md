@@ -1,6 +1,6 @@
-# Lunar — Deep Evaluation of the Synchronization and Adjustment Mechanism
+# Time Actual — Deep Evaluation of the Synchronization and Adjustment Mechanism
 
-**Scope.** This document evaluates, but does not change, Lunar's time-sync pipeline (NTP/NTS query → concurrence gate → PLL clockwork → persisted discipline) from three angles: **security**, **guaranteed correctness**, and **availability**. It closes with a prioritized proposal for improvement.
+**Scope.** This document evaluates, but does not change, Time Actual's time-sync pipeline (NTP/NTS query → concurrence gate → PLL clockwork → persisted discipline) from three angles: **security**, **guaranteed correctness**, and **availability**. It closes with a prioritized proposal for improvement.
 
 **Reader aid.** Small-print grey boxes interspersed between sections explain abbreviations and background concepts. They can be skipped by readers already familiar with NTP, NTS, PLLs, and Windows timing primitives.
 
@@ -9,7 +9,7 @@
 <details>
 <summary><sub><i>Primer 0 — orientation: what problem is this clock solving?</i></sub></summary>
 
-<sub>Lunar is a digital desktop clock that refuses to display the Windows system clock. The Windows clock can be wrong (user edit, malware, CMOS battery, drift, broken `w32time`, VM sleep/wake). Lunar reads the true time directly from Internet time servers, keeps its own monotonic running clock locally, and renders a red **INOP** ("inoperative") state whenever it cannot verify the time. The sync-and-adjustment mechanism analysed below is the safety-critical core: it is what lets the clock claim "trusted time" and what lets it refuse to lie.</i></sub>
+<sub>Time Actual is a digital desktop clock that refuses to display the Windows system clock. The Windows clock can be wrong (user edit, malware, CMOS battery, drift, broken `w32time`, VM sleep/wake). Time Actual reads the true time directly from Internet time servers, keeps its own monotonic running clock locally, and renders a red **INOP** ("inoperative") state whenever it cannot verify the time. The sync-and-adjustment mechanism analysed below is the safety-critical core: it is what lets the clock claim "trusted time" and what lets it refuse to lie.</i></sub>
 
 </details>
 
@@ -27,11 +27,11 @@
 
 <sub><b>NTP</b> (Network Time Protocol, RFC 5905). Standard protocol for distributing time across the Internet. A client timestamps its outgoing request (T1), the server timestamps receipt (T2) and reply (T3), the client timestamps arrival (T4). Round-trip and offset follow from these four numbers.</sub>
 
-<sub><b>SNTP</b> (Simple NTP, RFC 4330). A stateless subset of NTP: one request, one reply, no long-running association, no statistical filtering by the client. Adequate for one-shot polling, which is what Lunar does.</sub>
+<sub><b>SNTP</b> (Simple NTP, RFC 4330). A stateless subset of NTP: one request, one reply, no long-running association, no statistical filtering by the client. Adequate for one-shot polling, which is what Time Actual does.</sub>
 
 <sub><b>NTS</b> (Network Time Security, RFC 8915). Cryptographic wrapper around NTP. A one-time <b>Key Establishment</b> (KE) handshake over TLS 1.3 gives the client cookies and keys; subsequent UDP time packets are authenticated with AEAD (<i>Authenticated Encryption with Associated Data</i>) so an on-path attacker cannot forge or tamper with them.</sub>
 
-<sub><b>SPKI pinning</b> (Subject Public Key Info). Lunar stores the SHA-256 hash of an endpoint's certificate public key after Windows CA enrollment/renewal. Ordinary operation uses that local continuity pin; renewal re-enters the Windows/Web PKI.</sub>
+<sub><b>SPKI pinning</b> (Subject Public Key Info). Time Actual stores the SHA-256 hash of an endpoint's certificate public key after Windows CA enrollment/renewal. Ordinary operation uses that local continuity pin; renewal re-enters the Windows/Web PKI.</sub>
 
 <sub><b>UDP port 123</b> is the standard NTP port; firewalls and captive portals frequently block or rewrite it.</sub>
 
@@ -41,9 +41,9 @@
 
 **Anchor.** On an `OK` cycle: the midpoint of the two agreeing operator-diverse NTS samples, projected to the selected QPC moment.
 
-**Rate discipline.** PI-style per-cycle rate correction with a per-cycle delta clamp that scales with the measurement interval (±20 ppm at the relaxed 600 s cadence, ±2 ppm at 60 s -- a few ms of network noise over a minute reads as ~100 ppm) and a ±200 ppm absolute clamp; a sample whose measured anchor uncertainty exceeds 250 ms (congestion, not merely a far anchor) holds the integrator. Persisted to `%APPDATA%\Lunar\discipline.dat` at shutdown, reloaded as bootstrap, rejected at > 30 days against *disciplined* UTC.
+**Rate discipline.** PI-style per-cycle rate correction with a per-cycle delta clamp that scales with the measurement interval (±20 ppm at the relaxed 600 s cadence, ±2 ppm at 60 s -- a few ms of network noise over a minute reads as ~100 ppm) and a ±200 ppm absolute clamp; a sample whose measured anchor uncertainty exceeds 250 ms (congestion, not merely a far anchor) holds the integrator. Persisted to `%APPDATA%\TimeActual\discipline.dat` at shutdown, reloaded as bootstrap, rejected at > 30 days against *disciplined* UTC.
 
-**Residual handling.** Accepted residuals snap immediately to the newest trusted anchor. Lunar no longer displays cosmetically-slewed time; if the clock cannot present a freshly trusted value, it renders INOP.
+**Residual handling.** Accepted residuals snap immediately to the newest trusted anchor. Time Actual no longer displays cosmetically-slewed time; if the clock cannot present a freshly trusted value, it renders INOP.
 
 **Cadence.** 60 s on `TRUST_OK`, 5 s on `TRUST_INOP`.
 
@@ -52,21 +52,21 @@
 <details>
 <summary><sub><i>Primer 2 — QPC, UTC, PLL, EMA, ppm, anchor, display lease, snap</i></sub></summary>
 
-<sub><b>QPC</b> (<i>QueryPerformanceCounter</i>). Windows' monotonic hardware tick counter. It never moves backwards, it does not change if the user edits the wall clock, it runs at a fixed frequency (typically 10 MHz). Lunar uses QPC for <i>all</i> local timing and only ever uses server replies for <i>UTC</i>.</sub>
+<sub><b>QPC</b> (<i>QueryPerformanceCounter</i>). Windows' monotonic hardware tick counter. It never moves backwards, it does not change if the user edits the wall clock, it runs at a fixed frequency (typically 10 MHz). Time Actual uses QPC for <i>all</i> local timing and only ever uses server replies for <i>UTC</i>.</sub>
 
-<sub><b>UTC</b> (Coordinated Universal Time). The time standard NTP delivers, in milliseconds since the Unix epoch in Lunar's representation.</sub>
+<sub><b>UTC</b> (Coordinated Universal Time). The time standard NTP delivers, in milliseconds since the Unix epoch in Time Actual's representation.</sub>
 
-<sub><b>PLL</b> (Phase-Locked Loop). A feedback mechanism that steers a local oscillator to match a reference. "Phase" here is the clock's instantaneous time; "frequency" is its rate. Lunar's PLL runs once per cycle and adjusts the local rate (ppm) so future elapsed QPC ticks project onto correct UTC.</sub>
+<sub><b>PLL</b> (Phase-Locked Loop). A feedback mechanism that steers a local oscillator to match a reference. "Phase" here is the clock's instantaneous time; "frequency" is its rate. Time Actual's PLL runs once per cycle and adjusts the local rate (ppm) so future elapsed QPC ticks project onto correct UTC.</sub>
 
-<sub><b>EMA</b> (<i>Exponential Moving Average</i>). Each new measurement updates the running estimate by a fraction α: <code>new = old + α·(sample − old)</code>. Lunar uses α = 0.25 for the rate estimate. Lower α → more damping, slower response; higher α → noisier, faster.</sub>
+<sub><b>EMA</b> (<i>Exponential Moving Average</i>). Each new measurement updates the running estimate by a fraction α: <code>new = old + α·(sample − old)</code>. Time Actual uses α = 0.25 for the rate estimate. Lower α → more damping, slower response; higher α → noisier, faster.</sub>
 
 <sub><b>ppm</b> (parts per million). A fractional rate offset. +57 ppm means the local crystal runs 57 µs fast per second, which is 4.9 s/day. Typical quartz drift is ±50 ppm.</sub>
 
 <sub><b>Anchor</b>. A pair <code>(qpc, utc)</code> that pins "this QPC moment corresponded to this UTC". Projecting forward uses <code>utc + (qpc_now − qpc_anchor) · (1 + ppm/1e6)</code>.</sub>
 
-<sub><b>Display lease</b> and <b>snap</b>. A trusted poll grants a short lease during which the display may render from the disciplined anchor. If the lease expires before another trusted poll renews it, the UI renders INOP. <i>Snap</i> = rebase the anchor instantly to the accepted trusted sample; Lunar favors correctness over smoothing.</sub>
+<sub><b>Display lease</b> and <b>snap</b>. A trusted poll grants a short lease during which the display may render from the disciplined anchor. If the lease expires before another trusted poll renews it, the UI renders INOP. <i>Snap</i> = rebase the anchor instantly to the accepted trusted sample; Time Actual favors correctness over smoothing.</sub>
 
-<sub><b>INOP</b> (inoperative). Aviation-inspired term: when the instrument cannot guarantee correct data, it says so instead of guessing. Lunar renders a red "INOP" state rather than display an untrusted time.</sub>
+<sub><b>INOP</b> (inoperative). Aviation-inspired term: when the instrument cannot guarantee correct data, it says so instead of guessing. Time Actual renders a red "INOP" state rather than display an untrusted time.</sub>
 
 </details>
 
@@ -85,7 +85,7 @@ Protected against: passive on-path observer, single-ISP hijack of UDP/123, DNS p
 
 <sub><b>On-path attacker</b>. Sits between client and server, can read, drop, modify, inject traffic (e.g. hostile ISP, malicious Wi-Fi, state-level filter). <b>Off-path attacker</b>. Can only inject, not observe; needs to guess response fields (harder). NTS defeats both for the time payload; plain SNTP defeats neither.</sub>
 
-<sub><b>Threat model</b>. An explicit enumeration of which adversaries, capabilities, and attack goals the design intends to defeat. "Implicit today" means Lunar does not have a written one; it is inferred from the code.</sub>
+<sub><b>Threat model</b>. An explicit enumeration of which adversaries, capabilities, and attack goals the design intends to defeat. "Implicit today" means Time Actual does not have a written one; it is inferred from the code.</sub>
 
 </details>
 
@@ -95,14 +95,14 @@ Protected against: passive on-path observer, single-ISP hijack of UDP/123, DNS p
 NTS remains the cryptographic trust anchor. The current gate requires two independent NTS slots from different operator families. If an adversary can selectively block TLS to enough NTS providers while letting UDP/123 through, the clock still goes INOP — a **denial-of-availability attack via the security layer**. There is no "NTS-disabled, degraded-trust fallback".
 
 **S2. Core source resolution depends on pinned DoH availability.**
-Plain DNS is never used, so a UDP/53 resolver-level attacker cannot redirect core SNTP traffic. A network that blocks or degrades all pinned DoH resolvers can still deny source resolution; Lunar fails closed rather than falling back to spoofable DNS.
+Plain DNS is never used, so a UDP/53 resolver-level attacker cannot redirect core SNTP traffic. A network that blocks or degrades all pinned DoH resolvers can still deny source resolution; Time Actual fails closed rather than falling back to spoofable DNS.
 
 <details>
 <summary><sub><i>Primer 4 — DNS, DNSSEC, RST, rate-limiting</i></sub></summary>
 
 <sub><b>DNS</b> (Domain Name System). Translates "time.nist.gov" into an IP address. Responses are normally unauthenticated; a hostile resolver can point a name at any address.</sub>
 
-<sub><b>DNSSEC</b>. Cryptographic signing of DNS responses. Windows' default resolver does not validate DNSSEC end-to-end; most apps inherit that. Lunar currently does no DNSSEC validation of its own.</sub>
+<sub><b>DNSSEC</b>. Cryptographic signing of DNS responses. Windows' default resolver does not validate DNSSEC end-to-end; most apps inherit that. Time Actual currently does no DNSSEC validation of its own.</sub>
 
 <sub><b>TCP RST</b>. A "reset" packet that forcibly closes a connection. An attacker can inject RSTs to break TLS handshakes selectively.</sub>
 
@@ -117,7 +117,7 @@ If one pinned provider serves stale or bad data (compromised or misconfigured), 
 This is elegant — but it means an attacker who can induce a ~150 ms authenticated NTS midpoint offset (within gate) that is consistent with the required core quorum can succeed. The current gate is "two operator-diverse NTS sources agree and ≥ 3 of 4 core sources agree with the NTS midpoint within 200 ms". Because NTS is authenticated, in practice the threat is provider compromise; but the gate architecture still does not distinguish "all sources agree to 20 ms" (high confidence) from "scraped agreement at 199 ms" (suspicious).
 
 **S5. Persisted rate file is unauthenticated.**
-`%APPDATA%\Lunar\discipline.dat` is plain ASCII `"<ppm> <lastSyncUtcMs>\n"`. A local attacker (or ransomware) that can write `AppData` can inject ±500 ppm which will be applied as bootstrap until the first sync re-verifies it. Window: up to ~6 seconds of wrong rate on first-anchor acquisition, which then snaps. Low impact, but the invariant "this is a safety clock" argues for at least a MAC or checksum.
+`%APPDATA%\TimeActual\discipline.dat` is plain ASCII `"<ppm> <lastSyncUtcMs>\n"`. A local attacker (or ransomware) that can write `AppData` can inject ±500 ppm which will be applied as bootstrap until the first sync re-verifies it. Window: up to ~6 seconds of wrong rate on first-anchor acquisition, which then snaps. Low impact, but the invariant "this is a safety clock" argues for at least a MAC or checksum.
 
 <details>
 <summary><sub><i>Primer 5 — MAC, HMAC, DPAPI</i></sub></summary>
@@ -181,11 +181,11 @@ We rely fully on the TLS 1.3 client-hello entropy + NTS cookie for replay protec
 
 </details>
 
-**C4. Display snaps instead of slewing.** Lunar now favors fail-closed correctness over smooth hand motion: accepted samples snap immediately, and stale display leases render INOP. The remaining trade-off is visual abruptness, not knowingly displaying a smoothed value that differs from the freshest trusted anchor.
+**C4. Display snaps instead of slewing.** Time Actual now favors fail-closed correctness over smooth hand motion: accepted samples snap immediately, and stale display leases render INOP. The remaining trade-off is visual abruptness, not knowingly displaying a smoothed value that differs from the freshest trusted anchor.
 
 **C5. No sanity bound on anchor jump.** NTS providers returning 2020 would be accepted without cross-check against the previous anchor if both operator-diverse NTS samples and enough core sources agree. A monotonic bound "new anchor cannot predate the last OK anchor by more than (elapsed_qpc + 60 s slack)" would catch this class deterministically.
 
-**C6. Rate clamp is rectangular.** Real crystal oscillators drift on the order of ±50 ppm; Lunar now uses a ±200 ppm absolute clamp and ±20 ppm per-cycle clamp. A rate target beyond ±100 ppm is still suspicious enough that future work could add stateful widening only on confirmed sustained drift.
+**C6. Rate clamp is rectangular.** Real crystal oscillators drift on the order of ±50 ppm; Time Actual now uses a ±200 ppm absolute clamp and ±20 ppm per-cycle clamp. A rate target beyond ±100 ppm is still suspicious enough that future work could add stateful widening only on confirmed sustained drift.
 
 **C7. No test coverage of the adjustment math under adversarial inputs.** Tests verify the concurrence gate and projection arithmetic, but no test feeds `Clock_OnSyncedNtpUtc` a time series with injected jitter / bias / jumps and asserts stability. For a safety clock this is the single biggest gap.
 
@@ -196,9 +196,9 @@ We rely fully on the TLS 1.3 client-hello entropy + NTS cookie for replay protec
 <details>
 <summary><sub><i>Primer 9 — availability, DoS, back-off, dual-stack</i></sub></summary>
 
-<sub><b>Availability</b>. The fraction of time a service performs its intended function. For Lunar: the fraction of clock-wall time during which the UI can render a <i>trusted</i> time (green) rather than INOP (red).</sub>
+<sub><b>Availability</b>. The fraction of time a service performs its intended function. For Time Actual: the fraction of clock-wall time during which the UI can render a <i>trusted</i> time (green) rather than INOP (red).</sub>
 
-<sub><b>DoS</b> (Denial of Service). Any attack or failure mode that reduces availability without necessarily compromising integrity. Lunar's "INOP when uncertain" stance converts many <i>integrity</i> threats into <i>availability</i> problems, which is correct but makes DoS the dominant failure mode.</sub>
+<sub><b>DoS</b> (Denial of Service). Any attack or failure mode that reduces availability without necessarily compromising integrity. Time Actual's "INOP when uncertain" stance converts many <i>integrity</i> threats into <i>availability</i> problems, which is correct but makes DoS the dominant failure mode.</sub>
 
 <sub><b>Back-off</b>. Lengthening the retry interval when failures persist, to avoid hammering a degraded service. Canonical pattern: exponential back-off with jitter.</sub>
 
@@ -206,7 +206,7 @@ We rely fully on the TLS 1.3 client-hello entropy + NTS cookie for replay protec
 
 </details>
 
-**A1. Hard dependency on NTS availability.** See S1. Real-world NTS providers (Cloudflare, Netnod, SIDN, PTB, NetTime) have had multi-hour outages; a broad outage across the NTS provider pool puts Lunar INOP despite healthy core SNTP sources.
+**A1. Hard dependency on NTS availability.** See S1. Real-world NTS providers (Cloudflare, Netnod, SIDN, PTB, NetTime) have had multi-hour outages; a broad outage across the NTS provider pool puts Time Actual INOP despite healthy core SNTP sources.
 
 **A2. Aggregator wait is bounded and shutdown-aware.** Worker contexts are refcounted, overdue workers can be detached after the cycle budget, and shutdown wakes the aggregator in short slices. Residual risk is now limited to detached workers that the process must reclaim on exit if the platform network stack wedges below the socket timeout layer.
 

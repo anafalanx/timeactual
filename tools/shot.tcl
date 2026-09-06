@@ -7,7 +7,7 @@
 # covered or in the background. Ported from els/tools/shot.tcl.
 #
 #   tclsh90.exe tools/shot.tcl <wish.exe> <lunar.tcl> <out.png> [file ...]
-#   tclsh90.exe tools/shot.tcl <lunar.exe> - <out.png> [file ...]   # single-exe
+#   tclsh90.exe tools/shot.tcl <TimeActual.exe> - <out.png> [file ...]   # single-exe
 #   tclsh90.exe tools/shot.tcl --selftest        ;# headless converter checks
 #
 # Set LUNAR_SHOT_TITLE to capture a specific toplevel/dialog by title.
@@ -119,12 +119,12 @@ proc main {argv} {
     set files [lrange $argv 3 end]
     if {$app eq "" || $script eq "" || $out eq ""} {
         puts stderr "usage: shot.tcl <wish.exe> <lunar.tcl> <out.png> \[file ...\]"
-        puts stderr "       shot.tcl <lunar.exe> - <out.png> \[file ...\]   ;# single-exe"
+        puts stderr "       shot.tcl <TimeActual.exe> - <out.png> \[file ...\]   ;# single-exe"
         exit 2
     }
     set ::env(LUNAR_NO_SINGLE_INSTANCE) 1
     if {$script eq "-"} {
-        set pid [exec $app {*}$files &]            ;# self-contained lunar.exe
+        set pid [exec $app {*}$files &]            ;# self-contained TimeActual.exe
     } else {
         set pid [exec $app $script {*}$files &]    ;# wish + lunar.tcl
     }

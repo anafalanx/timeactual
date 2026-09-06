@@ -1,4 +1,4 @@
-# tools/package.tcl - append the Lunar zipfs payload onto a wrapper exe.
+# tools/package.tcl - append the Time Actual zipfs payload onto a wrapper exe.
 #
 # Runs under the STATIC tclsh90s so zipfs can lmkimg-append the staged app
 # payload - main.tcl (= lunar.tcl), resources/, tcl_library/, tk_library/ at
@@ -73,7 +73,7 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     }
 }
 set out [lindex $positional 0]
-if {$out eq ""} { set out [file join $ROOT dist lunar.exe] }
+if {$out eq ""} { set out [file join $ROOT dist TimeActual.exe] }
 
 set wish [TCp tcl9s bin wish90s.exe]
 if {![file exists $wish]} { error "static wish missing: $wish" }

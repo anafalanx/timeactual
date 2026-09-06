@@ -20,6 +20,9 @@
 #include "version.h"
 
 #define GH_API_HOST   "api.github.com"
+// The repository keeps its original name; if it is ever renamed on GitHub
+// this path must follow (the API answers a renamed repo with a redirect,
+// which this minimal client does not chase).
 #define GH_API_PATH   "/repos/anafalanx/lunar/releases/latest"
 #define GH_CONNECT_TIMEOUT_MS  6000
 #define GH_IO_TIMEOUT_MS       6000
@@ -99,7 +102,7 @@ static int fetch_latest_tag(char *out, size_t cap) {
     int rlen = _snprintf(req, sizeof req,
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
-        "User-Agent: Lunar-Clock\r\n"
+        "User-Agent: TimeActual\r\n"
         "Accept: application/vnd.github+json\r\n"
         "Connection: close\r\n"
         "\r\n",

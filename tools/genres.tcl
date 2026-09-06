@@ -1,5 +1,5 @@
 #!/usr/bin/env tclsh
-# tools/genres.tcl -- generate the native build's PE resource inputs (Lunar).
+# tools/genres.tcl -- generate the native build's PE resource inputs (Time Actual).
 # Ported from els/tools/genres.tcl. Emits <outdir>/lunar.exe.manifest and
 # <outdir>/lunar.rc. The version comes from the top-level VERSION file (the
 # same single source the C engine's build.py reads). windres compiles
@@ -37,8 +37,8 @@ proc emit {path text} {
 set manifest [string map [list @VER@ $vdot] {<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"
 	xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-    <assemblyIdentity version="@VER@" processorArchitecture="AMD64" name="anafalanx.lunar" type="win32"/>
-    <description>Lunar - trustworthy network time for Windows</description>
+    <assemblyIdentity version="@VER@" processorArchitecture="AMD64" name="anafalanx.timeactual" type="win32"/>
+    <description>Time Actual - trustworthy network time for Windows</description>
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
 	<security>
 	    <requestedPrivileges>
@@ -73,7 +73,7 @@ emit [file join $OUT lunar.exe.manifest] $manifest
 # --- resource script: icon + manifest + version info --------------------------
 set rc [string map [list @FV4@ $fv4 @VER@ $ver] {#include <windows.h>
 
-/* app icon (resource name "lunar" so Explorer shows Lunar's icon) */
+/* app icon (a single named icon group; Explorer shows the first one) */
 lunar ICON "lunar.ico"
 
 /* application manifest: CREATEPROCESS_MANIFEST_RESOURCE_ID (1), RT_MANIFEST (24) */
@@ -93,12 +93,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "anafalanx"
-            VALUE "FileDescription",  "Lunar"
+            VALUE "FileDescription",  "Time Actual"
             VALUE "FileVersion",      "@VER@"
-            VALUE "InternalName",     "Lunar"
-            VALUE "LegalCopyright",   "Copyright (C) 2026 the Lunar authors. MIT licensed."
-            VALUE "OriginalFilename", "Lunar.exe"
-            VALUE "ProductName",      "Lunar"
+            VALUE "InternalName",     "TimeActual"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 the Time Actual authors. MIT licensed."
+            VALUE "OriginalFilename", "TimeActual.exe"
+            VALUE "ProductName",      "Time Actual"
             VALUE "ProductVersion",   "@VER@"
         END
     END

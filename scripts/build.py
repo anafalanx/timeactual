@@ -1,4 +1,4 @@
-"""Build Lunar's vendored mbedTLS archive and generate build/version.h.
+"""Build Time Actual's vendored mbedTLS archive and generate build/version.h.
 
 Usage (from project root):
 

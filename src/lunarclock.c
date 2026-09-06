@@ -212,7 +212,7 @@ static void draw_uncertainty(ClockWidget *clock, float cx, float cy,
                              float size, float seconds) {
     if (clock->boundMs <= 0) return;
     float half = (float)clock->boundMs / 1000.0f * 6.0f;
-    D2D1_COLOR_F tint = rgb(220, 50, 47);   /* the needle's own colour */
+    D2D1_COLOR_F tint = rgb(15, 71, 175);   /* the needle's own colour */
     float radius = size * 0.44f;   /* same reach as the second hand's tip */
     ID2D1RenderTarget *target = (ID2D1RenderTarget *)clock->target;
 
@@ -255,10 +255,10 @@ static void draw_uncertainty(ClockWidget *clock, float cx, float cy,
 static void draw_dial(ClockWidget *clock, float cx, float cy, float size,
                       int live) {
     ID2D1RenderTarget *target = (ID2D1RenderTarget *)clock->target;
-    D2D1_COLOR_F ink = rgb(26, 26, 26);
-    D2D1_COLOR_F soft = rgb(107, 113, 119);
+    D2D1_COLOR_F ink = rgb(0, 0, 0);
+    D2D1_COLOR_F soft = rgb(110, 110, 110);
     D2D1_COLOR_F ring = rgb(212, 212, 212);
-    D2D1_COLOR_F face = rgb(242, 242, 242);
+    D2D1_COLOR_F face = rgb(255, 255, 255);
     /* Match the original Direct2D face: an inset dial, full-length ticks,
      * and a double marker at 12 o'clock. */
     float radius = size * 0.46f;
@@ -301,7 +301,7 @@ static void draw_dial(ClockWidget *clock, float cx, float cy, float size,
     for (int mark = 1; mark < 12; ++mark) {
         /* Five-minute markers double as the persistent chime controls. */
         D2D1_COLOR_F marker = (clock->armedMask & (1u << mark))
-                            ? rgb(220, 50, 47) : ink;
+                            ? rgb(15, 71, 175) : ink;
         set_brush(clock, marker);
         D2D1_POINT_2F from = polar(cx, cy, radius - size * 0.050f, mark * 30.0f);
         D2D1_POINT_2F to = polar(cx, cy, radius, mark * 30.0f);
@@ -311,7 +311,7 @@ static void draw_dial(ClockWidget *clock, float cx, float cy, float size,
 
     {
         D2D1_COLOR_F marker = (clock->armedMask & 1u)
-                            ? rgb(220, 50, 47) : ink;
+                            ? rgb(15, 71, 175) : ink;
         float offset = size * 0.020f;
         D2D1_POINT_2F from = polar(cx, cy, radius - size * 0.050f, 0.0f);
         D2D1_POINT_2F to = polar(cx, cy, radius, 0.0f);
@@ -334,7 +334,7 @@ static void draw_dial(ClockWidget *clock, float cx, float cy, float size,
 
     /* The needle: the best-estimate centerline of the same red sector, and
      * the floor width of the second hand when the bound is tight. */
-    D2D1_COLOR_F accent = rgb(220, 50, 47);
+    D2D1_COLOR_F accent = rgb(15, 71, 175);
     D2D1_POINT_2F tip = polar(cx, cy, size * 0.44f, seconds * 6.0f);
     D2D1_POINT_2F tail = polar(cx, cy, -size * 0.08f, seconds * 6.0f);
     set_brush(clock, accent);
@@ -360,7 +360,7 @@ static HRESULT create_target(ClockWidget *clock, HWND hwnd, int width, int heigh
     hr = ID2D1Factory_CreateHwndRenderTarget(g_d2d, &properties,
                                               &hwndProperties, &clock->target);
     if (FAILED(hr)) return hr;
-    D2D1_COLOR_F initial = rgb(26, 26, 26);
+    D2D1_COLOR_F initial = rgb(0, 0, 0);
     hr = ID2D1HwndRenderTarget_CreateSolidColorBrush(clock->target, &initial,
                                                       NULL, &clock->brush);
     if (FAILED(hr)) discard_target(clock);
@@ -417,7 +417,7 @@ static void clock_redraw(void *clientData) {
 
     ID2D1RenderTarget *target = (ID2D1RenderTarget *)clock->target;
     ID2D1RenderTarget_BeginDraw(target);
-    D2D1_COLOR_F page = rgb(242, 242, 242);
+    D2D1_COLOR_F page = rgb(255, 255, 255);
     ID2D1RenderTarget_Clear(target, &page);
     ID2D1RenderTarget_SetAntialiasMode(target, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 

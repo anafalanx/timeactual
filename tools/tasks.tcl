@@ -1,5 +1,5 @@
 #!/usr/bin/env tclsh
-# tools/tasks.tcl - Lunar's task runner, ported from els/tools/tasks.tcl.
+# tools/tasks.tcl - Time Actual's task runner, ported from els/tools/tasks.tcl.
 # Builds the native Tcl/Tk shell exe against z's shared Tcl/Tk 9 + UCRT64
 # gcc payloads. Invoked as `z <task>` (via z.json) or directly:
 #   <z>/.z/r/tcltk/9.0.3/tcl9/bin/tclsh90.exe tools/tasks.tcl <task>
@@ -129,12 +129,21 @@ proc need {args} {
 
 # ---- tasks --------------------------------------------------------------
 proc task_help {args} {
-    puts {Lunar task runner
-  z build [out]   build the native Tcl/Tk shell exe -> dist/lunar.exe
+    puts {Time Actual task runner
+  z build [out]   build the native Tcl/Tk shell exe -> dist/TimeActual.exe
   z check [exe]   run the exe's --selftest and report pass/fail
   z run           launch the shell under wish (dev, no build)
   z sign [exe]    code-sign the release exe (Certum/SimplySign) + verify
+  z icon [--face #hex] [--ink #hex] [--accent #hex]
+                  render assets/icon.ico + icon.png from tools/icon.tcl
   z env           print resolved toolchain paths}
+}
+
+# icon -- regenerate the application icon from tools/icon.tcl (palette and
+# geometry live at the top of that file; flags override the palette).
+proc task_icon {args} {
+    need tclsh
+    stream [tclsh] [P tools icon.tcl] --out [P assets] --preview [P build icon] {*}$args
 }
 
 proc task_env {args} {
@@ -153,7 +162,7 @@ proc task_run {args} {
     puts "launched lunar.tcl under wish"
 }
 
-# Lunar system libraries. els's 15 (the wish90s import table) plus the
+# Time Actual system libraries. els's 15 (the wish90s import table) plus the
 # engine's crypto/net imports (crypt32/bcrypt/wtsapi32); ws2_32 is already
 # in els's set. Unused imports are harmless while the engine isn't linked.
 set ::SYSLIBS {
@@ -187,7 +196,7 @@ proc engine_prereqs {} {
 
 proc task_build {args} {
     need gcc tclsh tclshs windres
-    set out [lindex $args 0] ; if {$out eq ""} { set out [P dist lunar.exe] }
+    set out [lindex $args 0] ; if {$out eq ""} { set out [P dist TimeActual.exe] }
     if {[string match -* $out]} { error "z build takes no flags; usage: z build ?outfile?" }
     set inc  [TCp tcl9 include]
     set libd [TCp tcl9s lib]
@@ -266,7 +275,7 @@ proc task_repackage {args} {
     need tclshs
     set bare [P build lunar-bare.exe]
     if {![file exists $bare]} { error "no build/lunar-bare.exe; run z build first" }
-    set out [P dist lunar.exe]
+    set out [P dist TimeActual.exe]
     set staged "$out.new"
     stream [tclshs] [P tools package.tcl] --wrapper $bare $staged
     catch {file delete -force "$out.old"}
@@ -278,13 +287,13 @@ proc task_repackage {args} {
 }
 
 proc task_check {args} {
-    set exe [lindex $args 0] ; if {$exe eq ""} { set exe [P dist lunar.exe] }
+    set exe [lindex $args 0] ; if {$exe eq ""} { set exe [P dist TimeActual.exe] }
     if {![file exists $exe]} { error "not found: $exe (run z build first)" }
-    set report [file join [file dirname $exe] lunar-selftest.txt]
+    set report [file join [file dirname $exe] timeactual-selftest.txt]
     file delete -force $report
     # The selftest fires a chime, arms a marker and ingests events: run it
     # against a scratch data dir so none of that lands in the user's real
-    # %APPDATA%\Lunar (events.log, settings, pin store).
+    # %APPDATA%\TimeActual (events.log, settings, pin store).
     set saveEnv [expr {[info exists ::env(LUNAR_DATA_DIR)] ? $::env(LUNAR_DATA_DIR) : ""}]
     set tmp [file join $::env(TEMP) "lunar-check-[pid]"]
     file mkdir $tmp
@@ -316,7 +325,7 @@ proc find_signtool {} {
 }
 proc task_sign {args} {
     set signtool [find_signtool]
-    set exe [lindex $args 0] ; if {$exe eq ""} { set exe [P dist lunar.exe] }
+    set exe [lindex $args 0] ; if {$exe eq ""} { set exe [P dist TimeActual.exe] }
     if {![file exists $exe]} { error "file not found: $exe" }
     set exe [file normalize $exe]
     puts "file:     $exe"
@@ -359,7 +368,7 @@ proc task_build-ext {args} {
 }
 
 # z shot <out.png> [--dev]
-#   default: screenshot the built dist/lunar.exe (single-exe mode)
+#   default: screenshot the built dist/TimeActual.exe (single-exe mode)
 #   --dev  : screenshot wish + lunar.tcl (fast UI iteration, no build)
 proc task_shot {args} {
     need gcc tclsh
@@ -370,7 +379,7 @@ proc task_shot {args} {
     if {[lsearch -exact $args --dev] >= 0} {
         stream [tclsh] [P tools shot.tcl] [wish] [P lunar.tcl] $out
     } else {
-        set exe [P dist lunar.exe]
+        set exe [P dist TimeActual.exe]
         if {![file exists $exe]} { error "not found: $exe (run z build first, or: z shot <out> --dev)" }
         stream [tclsh] [P tools shot.tcl] $exe - $out
     }
@@ -380,7 +389,7 @@ proc task_shot {args} {
 proc task_uishot {args} {
     need gcc tclsh
     if {[llength $args] < 1 || [llength $args] > 2} {
-        error "usage: z uishot <out.png> ?trusted|degraded|wide|stopped|acquiring|settings|eventlog|eventlog-filtered|eventlog-sorted?\n(dialog stages need LUNAR_SHOT_TITLE: \"Lunar Settings\" / \"Lunar — Event Log\")"
+        error "usage: z uishot <out.png> ?trusted|degraded|wide|stopped|acquiring|settings|eventlog|eventlog-filtered|eventlog-sorted?\n(dialog stages need LUNAR_SHOT_TITLE: \"Time Actual Settings\" / \"Time Actual — Event Log\")"
     }
     if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
     stream [tclsh] [P tools shot.tcl] [wish] [P tools uishot.tcl] {*}$args

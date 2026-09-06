@@ -599,12 +599,33 @@ static int ResizeWatch_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
 static int RunAtStartup_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
                             int objc, Tcl_Obj *const objv[]) {
     static const wchar_t *kSub = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    static const wchar_t *kVal = L"Lunar";
+    static const wchar_t *kVal = L"TimeActual";
+    static const wchar_t *kOld = L"Lunar";       /* the value name before 0.58 */
     if (objc == 1) {
-        int on = 0; HKEY k;
+        int on = 0, legacy = 0; HKEY k;
         if (RegOpenKeyExW(HKEY_CURRENT_USER, kSub, 0, KEY_QUERY_VALUE, &k) == ERROR_SUCCESS) {
             if (RegQueryValueExW(k, kVal, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) on = 1;
+            else if (RegQueryValueExW(k, kOld, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) legacy = 1;
             RegCloseKey(k);
+        }
+        if (legacy) {
+            /* A pre-rename entry points at an exe that no longer exists:
+             * re-register under the new name at our own path, then drop it. */
+            HKEY w;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, kSub, 0, NULL, 0, KEY_SET_VALUE,
+                                NULL, &w, NULL) == ERROR_SUCCESS) {
+                wchar_t exe[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+                if (n > 0 && n < MAX_PATH) {
+                    wchar_t q[MAX_PATH + 2];
+                    int qn = wsprintfW(q, L"\"%s\"", exe);
+                    if (RegSetValueExW(w, kVal, 0, REG_SZ, (const BYTE *)q,
+                                       (DWORD)((qn + 1) * (int)sizeof(wchar_t))) == ERROR_SUCCESS) {
+                        RegDeleteValueW(w, kOld);
+                        on = 1;
+                    }
+                }
+                RegCloseKey(w);
+            }
         }
         Tcl_SetObjResult(ip, Tcl_NewIntObj(on));
         return TCL_OK;
@@ -632,6 +653,7 @@ static int RunAtStartup_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     } else {
         rc = RegDeleteValueW(k, kVal);
         if (rc == ERROR_FILE_NOT_FOUND) rc = ERROR_SUCCESS;
+        RegDeleteValueW(k, kOld);
     }
     RegCloseKey(k);
     if (rc != ERROR_SUCCESS) {

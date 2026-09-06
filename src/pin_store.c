@@ -318,7 +318,9 @@ static int ProtectBlob(const uint8_t *plain, DWORD plain_len,
     in.pbData = (BYTE *)plain;
     in.cbData = plain_len;
     memset(out, 0, sizeof *out);
-    return CryptProtectData(&in, L"Lunar enrolled pin cache", NULL, NULL, NULL,
+    // The description is metadata inside the blob; decryption ignores it, so
+    // stores written under the old product name keep loading.
+    return CryptProtectData(&in, L"Time Actual enrolled pin cache", NULL, NULL, NULL,
                             CRYPTPROTECT_UI_FORBIDDEN, out) ? 1 : 0;
 }
 

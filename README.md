@@ -1,10 +1,12 @@
-# Lunar
+# Time Actual
 
 A trusted time reference for Windows, presented as a minimalist analog clock.
 A hardened C (C23) engine sits beneath a statically-linked Tcl/Tk shell —
-one self-contained, signed `.exe`.
+one self-contained, signed `.exe`. (Released as *Lunar* up to 0.57; the
+first start of 0.58 carries a Lunar installation's pins, settings and logs
+over to `%APPDATA%\TimeActual`.)
 
-Lunar keeps its own cryptographically-attested timescale — disciplined
+Time Actual keeps its own cryptographically-attested timescale — disciplined
 by authenticated NTS consensus, never by the OS clock — and uses it to
 tell you the true time, how certain it is, and **when your PC's own
 clock is wrong and by how much**. It is fail-honest: it never silently
@@ -21,7 +23,7 @@ The shipped product is the Tcl/Tk shell. Building it needs:
 
       pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-python
 
-- A **static Tcl/Tk 9** build (headers + static `.a`s). Lunar links it
+- A **static Tcl/Tk 9** build (headers + static `.a`s). Time Actual links it
   in so the exe has no external Tcl/Tk dependency. `tools/tasks.tcl`
   discovers it under the z workspace layout (`r/tcltk/9.0.3`) or from the
   `Z_TCLTK` environment variable.
@@ -39,11 +41,11 @@ recompiling — fast for Tcl-only edits).
 
 Output:
 
-- `dist/lunar.exe` — the app binary, a single self-contained exe.
+- `dist/TimeActual.exe` — the app binary, a single self-contained exe.
 
 ## Run
 
-Double-click `lunar.exe`. No other files are needed: Tcl/Tk 9 is linked
+Double-click `TimeActual.exe`. No other files are needed: Tcl/Tk 9 is linked
 in statically, the app and its script libraries ride along as an appended
 zipfs image, and the C engine (libgcc + mbedTLS) is archived in.
 
@@ -94,7 +96,7 @@ zipfs image, and the C engine (libgcc + mbedTLS) is archived in.
   covers broken timing continuity (suspend/resume); **ACQUIRING** /
   **NO SIGNAL** cover a run that has not yet, or no longer, anchored.
   There is no intermediate "degraded" tier.
-- **System-clock witness.** Lunar never *displays* the Windows clock,
+- **System-clock witness.** Time Actual never *displays* the Windows clock,
   but with a disciplined reference in hand it *measures* it: the status
   bar shows "SYS+N.NN", and every step in the OS clock
   (a w32time correction, a manual set, a VM time-sync) is logged with its

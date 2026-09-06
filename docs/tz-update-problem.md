@@ -3,9 +3,9 @@
 **Status:** Known limitation. No action planned.
 **First recorded:** 2026-04-22.
 
-## What Lunar does today
+## What Time Actual does today
 
-Lunar embeds a snapshot of the IANA time-zone database (tzdata) directly
+Time Actual embeds a snapshot of the IANA time-zone database (tzdata) directly
 in the executable at build time. The snapshot is produced by
 `scripts/gen_tz_embed.py` from whatever `zic`-compiled zoneinfo tree
 lives on the build machine (currently MSYS2's
@@ -13,7 +13,7 @@ lives on the build machine (currently MSYS2's
 is discarded; future transitions plus the POSIX TZ footer are kept.
 
 Consequences:
-- Lunar never consults the OS for time-zone information.
+- Time Actual never consults the OS for time-zone information.
 - The embedded blob is ~15 KB for 313 canonical zones.
 - Correctness is bounded by the tzdata release we bundled at build
   time.
@@ -26,9 +26,9 @@ observances). The IANA releases a new tzdata version whenever that
 happens -- historically 4-10 times per year, of which typically 1-2
 affect a "now" query for *some* zone.
 
-A Lunar binary built in, say, 2026 and launched in 2030 will use 2026's
+A Time Actual binary built in, say, 2026 and launched in 2030 will use 2026's
 rules. For zones whose rules haven't changed (the overwhelming
-majority), this is fine forever. For zones that have changed, Lunar
+majority), this is fine forever. For zones that have changed, Time Actual
 will show a wall-clock time that is off by up to one hour seasonally,
 or occasionally by a fixed amount year-round.
 
@@ -47,11 +47,11 @@ Estimated impact of a 4-6 year stale binary:
 
 ### Why users might not notice
 
-- Lunar is a clock. They read the big digits. The small zone label
+- Time Actual is a clock. They read the big digits. The small zone label
   next to it rarely catches the eye.
 - If the user is *in* one of the volatile zones, their own OS would
   also be confused unless updated. In that case the discrepancy is a
-  sign of the times, not specifically Lunar's fault.
+  sign of the times, not specifically Time Actual's fault.
 - If the user is *not* in one of those zones but watches one, they'd
   notice only during the hour-wide DST transition windows.
 
@@ -66,12 +66,12 @@ The obvious fixes each carry real cost for a cosmetic benefit:
   trust in a third party. Adds a signing key to manage, a server to
   keep alive, certificate pinning to maintain, retry/staleness
   semantics to design.
-- Doubles Lunar's network trust surface beyond the existing DoH/NTS
+- Doubles Time Actual's network trust surface beyond the existing DoH/NTS
   endpoints authenticated through local enrolled pins.
 - Massive complexity win for users who would mostly never see the
   benefit.
 
-### Sidecar file (`lunar.tzdb` next to `Lunar.exe`)
+### Sidecar file (`lunar.tzdb` next to `TimeActual.exe`)
 
 - Cheap to implement: same blob format, file I/O only, embedded
   fallback if absent.
@@ -84,7 +84,7 @@ The obvious fixes each carry real cost for a cosmetic benefit:
 
 ### On-demand HTTPS pull from a pinned endpoint
 
-- User clicks "Update time zones" in Settings; Lunar fetches a signed
+- User clicks "Update time zones" in Settings; Time Actual fetches a signed
   blob from a static URL.
 - Requires hosting that endpoint for the life of the application.
 - If the endpoint ever goes away (domain lapse, cert expiry, project
@@ -92,7 +92,7 @@ The obvious fixes each carry real cost for a cosmetic benefit:
   arguably *worse* than just shipping a stale bundle, because users
   now have a false sense that their data is fresh.
 
-### Ship a new Lunar build per tzdata release
+### Ship a new Time Actual build per tzdata release
 
 - What we effectively do now. The cost is maintainer effort and user
   pressure to "always update."
@@ -102,29 +102,29 @@ The obvious fixes each carry real cost for a cosmetic benefit:
 
 ## Why we're leaving it alone
 
-Lunar's architectural value proposition is: **single self-contained
+Time Actual's architectural value proposition is: **single self-contained
 exe, minimal network surface, no installer, no background processes,
 no phoning home.** Every plausible fix above contradicts at least one
 of those. The staleness problem is real but small, and a user who
-cares can always download a newer Lunar build -- that's already how
+cares can always download a newer Time Actual build -- that's already how
 operating systems, browsers, and language runtimes handle tzdata
 freshness.
 
 For the same reason Go, Python, Chrome, iOS, and every Linux distro
 bundle tzdata with the platform and refresh it on platform updates,
-Lunar bundles it with the binary and refreshes it on binary updates.
+Time Actual bundles it with the binary and refreshes it on binary updates.
 It's the standard pattern.
 
 ## What would make us revisit this
 
 Any of:
 
-1. An actual user reports that Lunar shows wrong local time in their
+1. An actual user reports that Time Actual shows wrong local time in their
    zone because of tzdata staleness.
 2. A major zone (one with tens of millions of residents: US,
    EU-member, India, Japan, China, Brazil, Russia, etc.) permanently
    changes its rules in a way that breaks bundled users.
-3. Lunar gains an auto-update mechanism for the binary itself, at
+3. Time Actual gains an auto-update mechanism for the binary itself, at
    which point piggy-backing tzdata on that channel becomes trivial.
 
 Until then: we accept the staleness, document it here, and rebuild

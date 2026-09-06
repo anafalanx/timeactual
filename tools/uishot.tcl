@@ -1,4 +1,4 @@
-# tools/uishot.tcl -- render a deterministic (stubbed-engine) Lunar UI state
+# tools/uishot.tcl -- render a deterministic (stubbed-engine) Time Actual UI state
 # for screenshot-based UI review, so the layout can be evaluated without a live
 # network sync. Driven by shot.tcl, which launches wish on this script:
 #
@@ -15,8 +15,8 @@
 #   stopped   holdover  ±6.5 s   (> default 5 s ceiling: no time shown)
 #   acquiring inop      no time  (bare dial; word only in the status bar)
 # Dialog stages (set LUNAR_SHOT_TITLE to the window title to capture):
-#   settings          -- "Lunar Settings", Clock tab
-#   eventlog          -- "Lunar — Event Log" over a seeded representative store
+#   settings          -- "Time Actual Settings", Clock tab
+#   eventlog          -- "Time Actual — Event Log" over a seeded representative store
 #   eventlog-filtered -- the log with search "pin" + level Warn+
 #   eventlog-sorted   -- the log sorted by Category
 #
@@ -76,7 +76,7 @@ after 150 {
 # Stage the Event Log window on a representative store: seeded directly
 # into ::lunar::events (bypassing lunar::ev so the scratch events.log
 # stays empty and the staged rows are the only content). Capture with
-# LUNAR_SHOT_TITLE set to "Lunar — Event Log" so shot.tcl targets the
+# LUNAR_SHOT_TITLE set to "Time Actual — Event Log" so shot.tcl targets the
 # log window, not the face.
 proc uishot_stage_eventlog {} {
     set B 1751731872000  ;# same staged instant the face uses
@@ -94,7 +94,7 @@ proc uishot_stage_eventlog {} {
     set ::lunar::events {}
     set i 0
     foreach {off trusted sev cat msg} [list \
-        -93000000 0 info  app      {session start (Lunar 0.54)} \
+        -93000000 0 info  app      {session start (Time Actual 0.54)} \
         -92990000 0 info  dns      {resolver ready, 4 pinned providers} \
         -92980000 0 info  ntp      {cycle: 4/4 replies, spread 31 ms} \
         -92970000 1 info  clock    {anchored, rate -2 ppm, anchorErr 44 ms} \
@@ -118,7 +118,7 @@ proc uishot_stage_eventlog {} {
         -180029   1 warn  ntp      {NOTE pin rotation observed for time.nist.gov} \
         -120776   1 info  ntp      {cycle: 4/4 replies, spread 26 ms} \
         -60415    1 info  nts      {time.cloudflare.com: rtt 17 ms, offset +3 ms} \
-        -30268    0 info  app      {session start (Lunar 0.55)} \
+        -30268    0 info  app      {session start (Time Actual 0.55)} \
         -20097    0 info  ntp      {cycle: 4/4 replies, spread 31 ms} \
         -10354    1 info  clock    {anchored, rate -2 ppm, anchorErr 45 ms} \
     ] {
