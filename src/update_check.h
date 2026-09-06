@@ -26,7 +26,7 @@ extern "C" {
 
 // The release page the notice links to.
 #define UPDATE_RELEASES_URL \
-    "https://github.com/anafalanx/lunar/releases/latest"
+    "https://github.com/anafalanx/timeactual/releases/latest"
 
 // Kick the check once, on a detached worker thread (non-blocking).
 // Safe to call more than once; only the first call does work.

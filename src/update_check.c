@@ -20,10 +20,9 @@
 #include "version.h"
 
 #define GH_API_HOST   "api.github.com"
-// The repository keeps its original name; if it is ever renamed on GitHub
-// this path must follow (the API answers a renamed repo with a redirect,
-// which this minimal client does not chase).
-#define GH_API_PATH   "/repos/anafalanx/lunar/releases/latest"
+// A renamed repository answers this path with a redirect to its new one;
+// fetch_latest_tag follows exactly one hop within api.github.com.
+#define GH_API_PATH   "/repos/anafalanx/timeactual/releases/latest"
 #define GH_CONNECT_TIMEOUT_MS  6000
 #define GH_IO_TIMEOUT_MS       6000
 #define GH_MAX_REPLY_BYTES     (64 * 1024)
@@ -65,11 +64,13 @@ int UpdateCheck_VersionCmp(const char *a, const char *b) {
 }
 #endif
 
-// GET the releases/latest JSON over CA-validated TLS and copy the
-// "tag_name" value (leading 'v' stripped) into out. Returns 1 on
-// success. Resolution is pinned-DoH; the TLS leaf is CA-validated
-// against the Windows store (no SPKI pin -- GitHub rotates certs).
-static int fetch_latest_tag(char *out, size_t cap) {
+// One GET of `path` on api.github.com over CA-validated TLS into `reply`
+// (NUL-terminated, at most `cap` bytes). Resolution is pinned-DoH; the TLS
+// leaf is CA-validated against the Windows store (no SPKI pin -- GitHub
+// rotates certs). Returns the HTTP status, 0 on any transport failure.
+static int fetch_once(const char *path, uint8_t *reply, size_t cap, size_t *out_len) {
+    *out_len = 0;
+    reply[0] = 0;
     char ip[NET_IP_STRLEN];
     int  fam = AF_UNSPEC;
     if (Dns_ResolveEx(GH_API_HOST, ip, &fam) != 0) {
@@ -83,8 +84,7 @@ static int fetch_latest_tag(char *out, size_t cap) {
                                  GH_IO_TIMEOUT_MS);
     if (s == INVALID_SOCKET) return 0;
 
-    int rc = 0;
-    uint8_t *reply = NULL;
+    int status = 0;
     PinnedTls tls;
     PinnedTls_Init(&tls);
 
@@ -98,7 +98,7 @@ static int fetch_latest_tag(char *out, size_t cap) {
     }
     mbedtls_ssl_context *ssl = PinnedTls_Ssl(&tls);
 
-    char req[256];
+    char req[512];
     int rlen = _snprintf(req, sizeof req,
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -106,7 +106,7 @@ static int fetch_latest_tag(char *out, size_t cap) {
         "Accept: application/vnd.github+json\r\n"
         "Connection: close\r\n"
         "\r\n",
-        GH_API_PATH, GH_API_HOST);
+        path, GH_API_HOST);
     if (rlen <= 0 || (size_t)rlen >= sizeof req) goto cleanup;
 
     for (size_t sent = 0; sent < (size_t)rlen; ) {
@@ -118,44 +118,77 @@ static int fetch_latest_tag(char *out, size_t cap) {
         sent += (size_t)wr;
     }
 
-    reply = (uint8_t *)malloc(GH_MAX_REPLY_BYTES + 1);
-    if (!reply) goto cleanup;
     size_t reply_len = 0;
     for (;;) {
-        int rd = mbedtls_ssl_read(ssl, reply + reply_len,
-                                  GH_MAX_REPLY_BYTES - reply_len);
+        int rd = mbedtls_ssl_read(ssl, reply + reply_len, cap - reply_len);
         if (rd == MBEDTLS_ERR_SSL_WANT_READ || rd == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
         if (rd == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) break;
-        if (rd <= 0) {
-            if ((rd == MBEDTLS_ERR_SSL_CONN_EOF || rd == 0) && reply_len > 0) break;
-            break;   // any read end: parse what we have
-        }
+        if (rd <= 0) break;   // any read end: parse what we have
         reply_len += (size_t)rd;
-        if (reply_len >= GH_MAX_REPLY_BYTES) break;
+        if (reply_len >= cap) break;
     }
     reply[reply_len] = 0;
+    *out_len = reply_len;
+    if (reply_len >= 12 && memcmp(reply, "HTTP/1.", 7) == 0) {
+        status = atoi((const char *)reply + 9);
+    }
+
+    PinnedTls_CloseNotify(&tls);
+cleanup:
+    PinnedTls_Free(&tls);   // owns the socket
+    return status;
+}
+
+// Fetch the releases/latest JSON and copy the "tag_name" value (leading
+// 'v' stripped) into out. Returns 1 on success. A repository that has
+// been renamed answers the compiled-in path with a redirect to its new
+// address; one such hop is followed, and only within api.github.com.
+static int fetch_latest_tag(char *out, size_t cap) {
+    uint8_t *reply = (uint8_t *)malloc(GH_MAX_REPLY_BYTES + 1);
+    if (!reply) return 0;
+    int rc = 0;
+    size_t len = 0;
+    int status = fetch_once(GH_API_PATH, reply, GH_MAX_REPLY_BYTES, &len);
+    if (status == 301 || status == 302 || status == 307 || status == 308) {
+        const char *loc = strstr((const char *)reply, "\nLocation: ");
+        if (!loc) loc = strstr((const char *)reply, "\nlocation: ");
+        if (loc) {
+            loc += 11;
+            const char *end = strpbrk(loc, "\r\n");
+            size_t n = end ? (size_t)(end - loc) : strlen(loc);
+            static const char prefix[] = "https://api.github.com";
+            const size_t plen = sizeof prefix - 1;
+            char next[256];
+            if (n > plen && n - plen < sizeof next &&
+                _strnicmp(loc, prefix, plen) == 0 && loc[plen] == '/') {
+                memcpy(next, loc + plen, n - plen);
+                next[n - plen] = 0;
+                Log_Append("update: repository moved; following redirect to %s", next);
+                status = fetch_once(next, reply, GH_MAX_REPLY_BYTES, &len);
+            }
+        }
+    }
+    if (status != 200) goto done;
 
     // Extract "tag_name": "vX.Y.Z" from the raw response (chunk framing
     // never splits a short field in practice -- same approach as els).
     const char *needle = "\"tag_name\"";
     char *p = strstr((char *)reply, needle);
-    if (!p) goto cleanup;
+    if (!p) goto done;
     p += strlen(needle);
     while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    if (*p != '"') goto cleanup;
+    if (*p != '"') goto done;
     p++;
     if (*p == 'v' || *p == 'V') p++;
     size_t n = 0;
     while (p[n] && p[n] != '"' && n < cap - 1) n++;
-    if (p[n] != '"') goto cleanup;
+    if (p[n] != '"') goto done;
     memcpy(out, p, n);
     out[n] = 0;
     rc = 1;
 
-    PinnedTls_CloseNotify(&tls);
-cleanup:
-    PinnedTls_Free(&tls);   // owns the socket
+done:
     free(reply);
     return rc;
 }

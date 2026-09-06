@@ -2261,6 +2261,13 @@ proc lunar::main {} {
     # Event store: session marker now; history merge-load off the paint
     # path (after idle still beats the first 1 s drain tick, and boot-time
     # events ingested before it are merged, not clobbered).
+    # Files from before 0.58 that nothing reads or writes any more.
+    foreach stale {invaders.dat lunar-ui.log} {
+        set f [file join [lunar::datadir] $stale]
+        if {[file exists $f] && ![catch { file delete -force $f }]} {
+            lunar::ev info app "removed stale file $stale (pre-0.58)"
+        }
+    }
     lunar::ev info app "session start (Time Actual $::lunar::version)"
     after idle lunar::events_load
     after 1000 lunar::events_drain_loop
