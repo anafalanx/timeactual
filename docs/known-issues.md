@@ -153,7 +153,7 @@ confident-looking dial that is actually unverified.
 The persisted discipline rate is stored as plaintext in
 `%APPDATA%\Lunar\discipline.dat`. Any process running as the same Windows
 user can modify or replace it. The ±200 ppm absolute clamp and the
-per-cycle ±20 ppm change clamp limit the damage, and re-verification happens
+interval-scaled per-cycle change clamp (at most ±20 ppm) limit the damage, and re-verification happens
 on the first successful NTP sync. So the worst-case outcome is a brief period
 after startup where the clock displays with a subtly wrong rate, corrected
 within one poll cycle.

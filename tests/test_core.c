@@ -497,10 +497,13 @@ static void test_clock_drift_convergence(void) {
 // A single gate-passing cycle must never swing the rate by more than the
 // per-cycle clamp, and sustained extreme error must saturate at the
 // absolute clamp, never beyond -- in both directions (S7 "pulse" defense).
+// Driven at the relaxed 600 s cadence, where the full 20 ppm/cycle clamp
+// applies (shorter intervals get proportionally less; see
+// test_clock_rate_clamp_scales_with_interval).
 static void test_clock_rate_clamps(void) {
     int64_t f = clock_test_qpc_freq();
 
-    // Positive saturation: server runs 5 s ahead every 60 s cycle.
+    // Positive saturation: server runs 5 s ahead every 600 s cycle.
     clock_test_reset_appdata();
     Clock_Init();
     int64_t utc = make_utc_ms(2026, 5, 2, 0, 0, 0);
@@ -508,8 +511,8 @@ static void test_clock_rate_clamps(void) {
     Clock_OnSyncedNtpUtc(utc, qpc);
     int32_t prev = Clock_RatePpm();
     for (int k = 0; k < 15; k++) {
-        qpc += f * 60;                  // 60 s
-        utc += 60000 + 5000;            // +5 s of error per cycle
+        qpc += f * 600;                 // 600 s
+        utc += 600000 + 5000;           // +5 s of error per cycle
         Clock_OnSyncedNtpUtc(utc, qpc);
         int32_t r = Clock_RatePpm();
         CHECK(r - prev <= 20);          // per-cycle change clamp
@@ -518,7 +521,7 @@ static void test_clock_rate_clamps(void) {
     }
     CHECK_EQ_INT(Clock_RatePpm(), 200); // fully saturated after >=10 cycles
 
-    // Negative saturation: server falls 5 s behind every 60 s cycle.
+    // Negative saturation: server falls 5 s behind every 600 s cycle.
     clock_test_reset_appdata();
     Clock_Init();
     utc = make_utc_ms(2026, 5, 3, 0, 0, 0);
@@ -526,8 +529,8 @@ static void test_clock_rate_clamps(void) {
     Clock_OnSyncedNtpUtc(utc, qpc);
     prev = Clock_RatePpm();
     for (int k = 0; k < 15; k++) {
-        qpc += f * 60;
-        utc += 60000 - 5000;            // -5 s of error per cycle
+        qpc += f * 600;
+        utc += 600000 - 5000;           // -5 s of error per cycle
         Clock_OnSyncedNtpUtc(utc, qpc);
         int32_t r = Clock_RatePpm();
         CHECK(prev - r <= 20);
@@ -603,6 +606,60 @@ static void test_clock_fault_gate_and_escape(void) {
     // After the snap the anchor moved to `bad`; a matching cycle agrees.
     Clock_OnPollCycle(TRUST_OK, bad, qpc, 0);
     CHECK_EQ_INT(Clock_Trust(), TRUST_OK);
+
+    // Evidence rule: a disagreement the sample's OWN uncertainty covers is
+    // not evidence against the projection (a congested cycle: RTTs of
+    // seconds, anchorErr in the hundreds of ms). Such cycles hold with the
+    // bound inflated and never count toward the forced re-anchor -- three
+    // in a row must NOT snap.
+    int64_t noisy = bad + 500;
+    for (int i = 0; i < 3; i++) Clock_OnPollCycle(TRUST_OK, noisy, qpc, 600);
+    CHECK_EQ_INT(Clock_Trust(), TRUST_HOLDOVER);          // held, not snapped
+    {
+        ClockDisplay df;
+        Clock_GetDisplay(&df);
+        CHECK(df.boundMs >= 500);                         // honest inflation
+    }
+    Clock_OnPollCycle(TRUST_OK, bad, qpc, 0);             // agreement resumes
+    CHECK_EQ_INT(Clock_Trust(), TRUST_OK);
+
+    // Consistency rule: a streak that flips sign restarts. +500, -500, +500
+    // is not three corroborating faults; it takes two more +500 to snap.
+    Clock_OnPollCycle(TRUST_OK, bad + 500, qpc, 0);       // streak 1 (+)
+    Clock_OnPollCycle(TRUST_OK, bad - 500, qpc, 0);       // restart (-)
+    Clock_OnPollCycle(TRUST_OK, bad + 500, qpc, 0);       // restart (+) -> 1
+    CHECK_EQ_INT(Clock_Trust(), TRUST_HOLDOVER);          // no snap yet
+    Clock_OnPollCycle(TRUST_OK, bad + 500, qpc, 0);       // 2
+    CHECK_EQ_INT(Clock_Trust(), TRUST_HOLDOVER);
+    Clock_OnPollCycle(TRUST_OK, bad + 500, qpc, 0);       // 3 -> snap
+    CHECK_EQ_INT(Clock_Trust(), TRUST_OK);
+}
+
+// The per-cycle rate clamp scales with the measurement interval: at a
+// 60 s cadence a few ms of network noise reads as ~100 ppm and must not
+// swing the rate by the full 20 ppm the 10-minute cadence is allowed.
+static void test_clock_rate_clamp_scales_with_interval(void) {
+    clock_test_reset_appdata();
+    Clock_Init();
+    int64_t f   = clock_test_qpc_freq();
+    int64_t utc = make_utc_ms(2026, 5, 7, 0, 0, 0);
+    int64_t qpc = Clock_Qpc();
+    Clock_OnSyncedNtpUtc(utc, qpc);
+    // Second sync at +60 s with a +8 ms residual: observed 133 ppm, gain
+    // 1/8 -> 16 ppm requested, but the 60 s clamp allows only 2.
+    qpc += 60 * f; utc += 60000 + 8;
+    Clock_OnSyncedNtpUtc(utc, qpc);
+    {
+        int32_t r = Clock_RatePpm();
+        CHECK(r >= 1 && r <= 2);
+    }
+    // At +600 s the same residual-rate may move the full 20 ppm.
+    qpc += 600 * f; utc += 600000 + 80;   // +80 ms over 600 s = 133 ppm again
+    Clock_OnSyncedNtpUtc(utc, qpc);
+    {
+        int32_t r = Clock_RatePpm();
+        CHECK(r >= 15 && r <= 22);          // 2 + up to 20 (16 requested)
+    }
 }
 
 // A sync shorter than the 30 s minimum interval must not update the rate
@@ -783,6 +840,10 @@ static void test_ntp_concur(void) {
     // anchorErr = max(base 20, median dev of the CONCURRING cores
     // {0,100,100} = 100); the excluded outlier cannot inflate it.
     CHECK_EQ_INT(spread, 100);
+    // The scheduler's convergence input is the CONCURRING cores' worst
+    // deviation from the anchor (100 here) -- pure agreement, no RTT term,
+    // and the excluded outlier (500) does not enter it either.
+    CHECK_EQ_INT((int)Ntp_LastSpreadMs(), 100);
 
     // 4) Both NTS agree, only 2 of 4 cores concur -> INOP (<3).
     s[0] = MkSrc(1, 1000, Q, "A");
@@ -794,6 +855,7 @@ static void test_ntp_concur(void) {
     best = qpc = -1;
     CHECK_EQ_INT(Ntp_Concur(s, &best, &qpc, &spread, NULL, NULL, NULL), TRUST_INOP);
     CHECK_EQ_INT(best, 0); CHECK_EQ_INT(qpc, 0);
+    CHECK_EQ_INT((int)Ntp_LastSpreadMs(), 500);   // worst core when the gate fails
 
     // 5) Both NTS agree, 3 cores OK, 1 core failed -> OK (3 of 4).
     s[0] = MkSrc(1, 1000, Q, "A");
@@ -1690,6 +1752,99 @@ static void test_logbuf_collect_since(void) {
     CHECK(tail[0].seq == lastSeq + 1);
 }
 
+// ---------------------------------------------------------------------------
+// DoH resolver runtime policy: out-of-window rotation corroboration and
+// failure back-off (pure decision cores, driven by caller-supplied ticks).
+// ---------------------------------------------------------------------------
+extern int  Dns_TestObserveRotation(size_t resolverIdx, const uint8_t spki[32],
+                                    uint64_t nowTick);
+extern int  Dns_TestNoteFailure(size_t resolverIdx, uint64_t nowTick);
+extern int  Dns_TestBackedOff(size_t resolverIdx, uint64_t nowTick);
+extern void Dns_TestResetResolverState(void);
+
+static void test_doh_rotation_corroboration(void) {
+    Dns_TestResetResolverState();
+    uint8_t k1[32], k2[32], k3[32], k4[32];
+    memset(k1, 0x11, sizeof k1);
+    memset(k2, 0x22, sizeof k2);
+    memset(k3, 0x33, sizeof k3);
+    memset(k4, 0x44, sizeof k4);
+    const uint64_t MIN = 60 * 1000;
+    // First sighting of a CA-valid, unpinned key: a new candidate.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k1, 1000), 0 /* NEW */);
+    // Seen again too soon: pending, never promoted.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k1, 1000 + 5 * MIN), 1 /* PENDING */);
+    // A second key takes the second slot (an anycast provider may
+    // alternate between two POP keys); k1 stays a live candidate.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k2, 1000 + 6 * MIN), 0 /* NEW */);
+    // The same key again >= 10 min after ITS first sighting promotes.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k2, 1000 + 16 * MIN), 2 /* PROMOTE */);
+    // Consumed: the next sighting of k2 starts a fresh candidate.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k2, 1000 + 17 * MIN), 0);
+    // k1 (first seen at t=1000) is still live and promotes now.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k1, 1000 + 18 * MIN), 2);
+    // Eviction: with both slots live (k3 new, k2 since 17 min) a further
+    // key evicts the OLDEST, so a flapping interposer never accumulates
+    // age: k2 comes back as NEW, not as a 23-minute-old candidate.
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k3, 1000 + 19 * MIN), 0);
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k4, 1000 + 20 * MIN), 0);   // evicts k2
+    CHECK_EQ_INT(Dns_TestObserveRotation(0, k2, 1000 + 40 * MIN), 0);
+    // Resolvers keep independent candidates.
+    CHECK_EQ_INT(Dns_TestObserveRotation(1, k1, 5000), 0);
+    CHECK_EQ_INT(Dns_TestObserveRotation(1, k1, 5000 + 11 * 60 * 1000), 2);
+}
+
+static void test_doh_failure_backoff(void) {
+    Dns_TestResetResolverState();
+    uint64_t t = 100000;
+    CHECK_EQ_INT(Dns_TestBackedOff(2, t), 0);
+    CHECK_EQ_INT(Dns_TestNoteFailure(2, t), 0);          // 1
+    CHECK_EQ_INT(Dns_TestNoteFailure(2, t), 0);          // 2
+    CHECK_EQ_INT(Dns_TestNoteFailure(2, t), 1);          // 3 -> back off
+    CHECK_EQ_INT(Dns_TestBackedOff(2, t + 1000), 1);
+    CHECK_EQ_INT(Dns_TestBackedOff(2, t + 59 * 60 * 1000), 1);
+    CHECK_EQ_INT(Dns_TestBackedOff(2, t + 61 * 60 * 1000), 0);   // expired
+    CHECK_EQ_INT(Dns_TestBackedOff(0, t), 0);            // others untouched
+}
+
+// The NTS picker learns each provider's RTT and draws near providers
+// first, so a transatlantic anchor never sits in the pair while a near
+// member of the same operator family answers.
+static void test_nts_picker_prefers_near_providers(void) {
+    Nts_TestResetPicker();
+    size_t n = 0;
+    const NtsProvider *pool = Nts_Pool(&n);
+    CHECK(n >= 4);
+    // EMA: first report seeds, later ones average 3:1.
+    Nts_ReportRtt(&pool[0], 40);
+    CHECK_EQ_INT((int)Nts_TestProviderRtt(0), 40);
+    Nts_ReportRtt(&pool[0], 80);
+    CHECK_EQ_INT((int)Nts_TestProviderRtt(0), 50);
+    // Mark every provider whose host is on another continent as far
+    // (system76 ohio/virginia/oregon), everything else near.
+    for (size_t i = 0; i < n; i++) {
+        const char *h = pool[i].host;   // `far` is a windef.h macro
+        int isFar = strstr(h, "ohio.") == h || strstr(h, "virginia.") == h ||
+                    strstr(h, "oregon.") == h;
+        Nts_ReportRtt(&pool[i], isFar ? 300 : 40);
+    }
+    for (int round = 0; round < 8; round++) {
+        Nts_ForceRepick();
+        const NtsProvider *out[2] = { NULL, NULL };
+        CHECK_EQ_INT((int)Nts_PickProviders(out, 2), 2);
+        for (int k = 0; k < 2; k++) {
+            CHECK(out[k] != NULL);
+            if (!out[k]) continue;
+            CHECK((int)Nts_TestProviderRtt((size_t)(out[k] - pool)) <= 100);
+        }
+        // operator diversity still holds within the near tier
+        if (out[0] && out[1]) {
+            CHECK(strcmp(out[0]->operator_family, out[1]->operator_family) != 0);
+        }
+    }
+    Nts_TestResetPicker();
+}
+
 static void test_logbuf_collect_wrapped(void) {
     // Overflow the ring so the overwrite-oldest branch runs and the head
     // moves: collection must stay in append order with contiguous seq,
@@ -2211,8 +2366,9 @@ static void test_dns_pool_pins(void) {
 }
 
 static void test_dns_pick_resolvers(void) {
-    // Asking for 2 must yield 2 distinct resolvers.
-    const DnsResolver *pick[4] = {0};
+    // Asking for 2 must yield 2 distinct resolvers. (The buffer must hold
+    // the whole pool: the "more than the pool" case below clamps to it.)
+    const DnsResolver *pick[16] = {0};
     size_t got = Dns_PickResolvers(pick, 2);
     CHECK_EQ_INT(got, 2);
     CHECK(pick[0] != NULL && pick[1] != NULL);
@@ -2859,6 +3015,10 @@ int main(void) {
     test_logbuf_truncation();
     test_logbuf_collect_since();
     test_logbuf_collect_wrapped();
+    test_doh_rotation_corroboration();
+    test_doh_failure_backoff();
+    test_nts_picker_prefers_near_providers();
+    test_clock_rate_clamp_scales_with_interval();
 
     test_tz_bounds();
     test_tz_southern_hemisphere();

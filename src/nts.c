@@ -112,6 +112,47 @@ static int                g_sticky_age = 0;
 
 void Nts_ForceRepick(void) { g_sticky_n = 0; }
 
+// Per-provider running RTT (ms, EMA 1/4; 0 = never measured). Written by
+// the NTS worker threads, read by the aggregator's draw: LONG + Interlocked.
+// Providers at or under NTS_NEAR_RTT_MS are drawn first, never-measured ones
+// next (so every provider gets measured), known-far ones last. The
+// operator-diversity rule still applies within that order, so a near
+// family member represents its family whenever it answers.
+#define NTS_NEAR_RTT_MS 100
+static volatile LONG g_rttEma[NTS_PROVIDER_COUNT];
+
+static size_t provider_index(const NtsProvider *p) {
+    return (size_t)(p - kProviders);
+}
+
+void Nts_ReportRtt(const NtsProvider *p, uint32_t rttMs)
+{
+    if (!p) return;
+    size_t idx = provider_index(p);
+    if (idx >= NTS_PROVIDER_COUNT) return;
+    LONG old = g_rttEma[idx];
+    LONG upd = old == 0 ? (LONG)rttMs : (LONG)((old * 3 + (LONG)rttMs) / 4);
+    if (upd <= 0) upd = 1;   // 0 is reserved for "unknown"
+    InterlockedExchange(&g_rttEma[idx], upd);
+}
+
+static int provider_tier(size_t idx) {
+    LONG r = g_rttEma[idx];
+    if (r == 0) return 1;                 // unmeasured: give it a turn
+    return r <= NTS_NEAR_RTT_MS ? 0 : 2;  // near first, far last
+}
+
+#ifdef LUNAR_TESTING
+uint32_t Nts_TestProviderRtt(size_t idx) {
+    return idx < NTS_PROVIDER_COUNT ? (uint32_t)g_rttEma[idx] : 0;
+}
+void Nts_TestResetPicker(void) {
+    for (size_t i = 0; i < NTS_PROVIDER_COUNT; i++) g_rttEma[i] = 0;
+    g_sticky_n = 0;
+    g_sticky_age = 0;
+}
+#endif
+
 size_t Nts_PickProviders(const NtsProvider **out, size_t n_want)
 {
     if (!out || n_want == 0) return 0;
@@ -142,6 +183,20 @@ size_t Nts_PickProviders(const NtsProvider **out, size_t n_want)
         size_t tmp = enabled[i];
         enabled[i] = enabled[j];
         enabled[j] = tmp;
+    }
+
+    // Stable partition of the shuffled order by RTT tier: the draw stays
+    // uniformly random WITHIN a tier, but near providers come before
+    // unmeasured ones, which come before known-far ones.
+    {
+        size_t ordered[NTS_PROVIDER_COUNT];
+        size_t n_ordered = 0;
+        for (int tier = 0; tier <= 2; tier++) {
+            for (size_t i = 0; i < n_enabled; i++) {
+                if (provider_tier(enabled[i]) == tier) ordered[n_ordered++] = enabled[i];
+            }
+        }
+        for (size_t i = 0; i < n_enabled; i++) enabled[i] = ordered[i];
     }
 
     for (size_t i = 0; i < n_want; i++) out[i] = NULL;
@@ -361,11 +416,23 @@ int Nts_DoKeEx(const NtsProvider *p, NtsKeResult *out,
                 }
             }
         } else if (openInfo.pin_matched) {
-            Log_Append("nts: %s local pin match host=%s spki=%s (1 of %u enrolled) newest valid=%s..%s nextCa=%s",
-                       p->label, p->host, openInfo.peer_spki_hex,
-                       (unsigned)n_pins,
-                       pin.not_before, pin.not_after,
-                       pin.renewal_due[0] ? pin.renewal_due : "unknown");
+            // Proof of posture, but per-exchange it is pure repetition:
+            // first match of the run, then at most hourly per provider.
+            static volatile LONG64 s_lastMatchLog[NTS_PROVIDER_COUNT];
+            size_t idx = provider_index(p);
+            LONG64 now = (LONG64)GetTickCount64();
+            LONG64 last = idx < NTS_PROVIDER_COUNT ? s_lastMatchLog[idx] : 0;
+            if (idx >= NTS_PROVIDER_COUNT || last == 0 ||
+                now - last >= 60LL * 60LL * 1000LL) {
+                if (idx < NTS_PROVIDER_COUNT) {
+                    InterlockedExchange64(&s_lastMatchLog[idx], now ? now : 1);
+                }
+                Log_Append("nts: %s local pin match host=%s spki=%s (1 of %u enrolled) newest valid=%s..%s nextCa=%s",
+                           p->label, p->host, openInfo.peer_spki_hex,
+                           (unsigned)n_pins,
+                           pin.not_before, pin.not_after,
+                           pin.renewal_due[0] ? pin.renewal_due : "unknown");
+            }
         }
     }
 
@@ -849,8 +916,27 @@ int Nts_FetchSampleEx(const NtsProvider *p,
             if (r == 1) {
                 jar_add_cookies(p->host, (const uint8_t (*)[NTSKE_MAX_COOKIE_LEN])harvest,
                                 harvest_lens, harvest_cnt);
-                Log_Append("nts: %s cookie reuse ok (jar=%d)",
-                           p->label, jar_cookie_count(p->host));
+                // Steady-state confirmation: log when the jar level changes,
+                // or hourly, never on every reuse.
+                {
+                    static volatile LONG s_lastJar[NTS_PROVIDER_COUNT];
+                    static volatile LONG64 s_lastJarLog[NTS_PROVIDER_COUNT];
+                    size_t idx = provider_index(p);
+                    int jar = jar_cookie_count(p->host);
+                    LONG64 now = (LONG64)GetTickCount64();
+                    int emit = 1;
+                    if (idx < NTS_PROVIDER_COUNT) {
+                        emit = s_lastJar[idx] != (LONG)jar || s_lastJarLog[idx] == 0 ||
+                               now - s_lastJarLog[idx] >= 60LL * 60LL * 1000LL;
+                        if (emit) {
+                            InterlockedExchange(&s_lastJar[idx], (LONG)jar);
+                            InterlockedExchange64(&s_lastJarLog[idx], now ? now : 1);
+                        }
+                    }
+                    if (emit) {
+                        Log_Append("nts: %s cookie reuse ok (jar=%d)", p->label, jar);
+                    }
+                }
                 mbedtls_platform_zeroize(harvest, sizeof harvest);
                 return 1;
             }

@@ -32,6 +32,14 @@
 // These addresses are reachability hints, not trust anchors: first-run
 // enrollment validates the resolver certificate through Windows/Web PKI
 // and stores the leaf SPKI in the protected local pin store.
+//
+// Every member must answer RFC 8484 POSTs over HTTP/1.1 -- the only HTTP
+// this client speaks. Quad9 (dns.quad9.net, 9.9.9.9) and Mullvad
+// (dns.mullvad.net, 194.242.2.2) are deliberately absent: both complete
+// the TLS handshake and then refuse HTTP/1.1 (Quad9 with "505 HTTP
+// Version Not Supported", Mullvad by closing without a response); they
+// serve DoH over HTTP/2 only. An entry that only ever gets as far as the
+// handshake looks healthy in the pin log while never answering a query.
 
 static const DnsResolver kResolvers[] = {
     {
@@ -42,16 +50,6 @@ static const DnsResolver kResolvers[] = {
         .ip6_secondary = "2606:4700:4700::1001",
         .label = "cloudflare",
         .operator_family = "cloudflare",
-    },
-
-    {
-        .hostname = "dns.quad9.net",
-        .ip_primary = "9.9.9.9",
-        .ip_secondary = "149.112.112.112",
-        .ip6_primary = "2620:fe::fe",
-        .ip6_secondary = "2620:fe::9",
-        .label = "quad9",
-        .operator_family = "quad9",
     },
 
     {
@@ -72,16 +70,6 @@ static const DnsResolver kResolvers[] = {
         .ip6_secondary = NULL,
         .label = "nextdns",
         .operator_family = "nextdns",
-    },
-
-    {
-        .hostname = "dns.mullvad.net",
-        .ip_primary = "194.242.2.2",
-        .ip_secondary = NULL,
-        .ip6_primary = "2a07:e340::2",
-        .ip6_secondary = NULL,
-        .label = "mullvad",
-        .operator_family = "mullvad",
     },
 };
 
@@ -137,6 +125,294 @@ size_t Dns_PickResolvers(const DnsResolver **out, size_t n_want)
 // v4 anycast addresses are unreachable. Read/written with plain int
 // access -- it is a preference hint, never a correctness gate.
 static volatile LONG g_preferred_family = AF_INET;
+
+// ---------------------------------------------------------------------------
+// Per-resolver runtime state
+// ---------------------------------------------------------------------------
+//
+// Three things the pool needs to remember across queries, none persisted:
+//
+//  * Back-off. A resolver that fails DOH_BACKOFF_AFTER_FAILURES times in a
+//    row (TLS rejected, unreachable, garbage) is skipped for DOH_BACKOFF_MS
+//    instead of being re-tried -- and re-logged -- on every single lookup
+//    of every cycle. Only transport, TLS, HTTP and malformed replies count:
+//    a well-formed DNS answer of any kind (records, NODATA, NXDOMAIN, even
+//    SERVFAIL) is a resolver in service. The AAAA NODATA every IPv4-only
+//    NTP host produces must never look like a dead resolver. Nothing here
+//    ever strands a lookup: when every resolver is backed off, the pool is
+//    tried anyway.
+//
+//  * Out-of-window rotation candidates. Operators such as Google and Mullvad
+//    rotate their DoH leaf keys long before the pinned certificate expires,
+//    i.e. long before our renewal window opens. A CA-valid leaf that matches
+//    no stored pin is therefore treated the way nts.c treats it: the answer
+//    is USED (it is exactly as trustworthy as a first-run enrollment), but
+//    the new key is persisted only once the SAME key is seen again at least
+//    DOH_ROTATION_CORROBORATE_MS later. A single spoofed session cannot
+//    enroll a key; DoH answers can in any case only steer us to NTP
+//    addresses whose time must still pass the NTS-authenticated gate. Two
+//    candidate slots per resolver cover anycast that alternates between
+//    two POP keys.
+//
+//  * Log rate limits for the per-connection "local pin match" confirmation
+//    (otherwise the single largest source of event-log volume) and for the
+//    "CA validation accepted" line a pending rotation produces on every
+//    connection until it is enrolled.
+//
+// Queries run on the worker threads, so the table sits behind its own CS.
+
+#define DOH_BACKOFF_AFTER_FAILURES     3
+#define DOH_BACKOFF_MS                 (60ULL * 60ULL * 1000ULL)   // 1 h
+#define DOH_ROTATION_CORROBORATE_MS    (10ULL * 60ULL * 1000ULL)   // 10 min
+#define DOH_PIN_MATCH_LOG_INTERVAL_MS  (60ULL * 60ULL * 1000ULL)   // 1 h
+#define DOH_ROT_CANDIDATES             2
+
+typedef struct {
+    int      consecutiveFailures;
+    uint64_t backoffUntilTick;      // 0 = not backed off
+    uint64_t lastMatchLogTick;      // 0 = never logged this run
+    uint64_t lastCaLogTick;         // "CA validation accepted" rate limit
+    char     lastCaSpkiHex[65];
+    uint64_t lastDiagLogTick;       // non-200 HTTP status diagnostics
+    // Rotation candidates; a slot is live while firstTick != 0. Two slots
+    // so a provider whose anycast alternates between two POP keys can
+    // still corroborate either of them.
+    struct {
+        uint8_t  spki[32];
+        uint64_t firstTick;
+    } cand[DOH_ROT_CANDIDATES];
+} DohResolverState;
+
+static DohResolverState g_resState[DNS_POOL_SIZE];
+static CRITICAL_SECTION g_resCs;
+static INIT_ONCE        g_resOnce = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK res_state_init(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once; (void)param; (void)ctx;
+    InitializeCriticalSection(&g_resCs);
+    return TRUE;
+}
+
+static DohResolverState *res_state(const DnsResolver *r) {
+    InitOnceExecuteOnce(&g_resOnce, res_state_init, NULL, NULL);
+    size_t idx = (size_t)(r - kResolvers);
+    if (idx >= DNS_POOL_SIZE) idx = 0;
+    return &g_resState[idx];
+}
+
+// The pure decision core, tick-parameterised so tests can drive time.
+enum { DOH_ROT_NEW = 0, DOH_ROT_PENDING = 1, DOH_ROT_PROMOTE = 2 };
+
+// doh_query_one outcomes beyond 0 (records returned) and -1 (transport,
+// TLS, HTTP or malformed reply -- a resolver failure): the resolver
+// answered, it just had nothing usable for us.
+enum { DOH_ANSWERED_EMPTY = 1,    // NODATA / NXDOMAIN: no such record
+       DOH_ANSWERED_ERROR = 2 };  // SERVFAIL, REFUSED...: ask another resolver
+
+static int doh_rotation_observe_locked(DohResolverState *st,
+                                       const uint8_t spki[32],
+                                       uint64_t nowTick,
+                                       uint64_t *outAgeMs) {
+    for (int i = 0; i < DOH_ROT_CANDIDATES; i++) {
+        if (st->cand[i].firstTick == 0 ||
+            memcmp(st->cand[i].spki, spki, 32) != 0) continue;
+        uint64_t age = nowTick - st->cand[i].firstTick;
+        if (outAgeMs) *outAgeMs = age;
+        if (age >= DOH_ROTATION_CORROBORATE_MS) {
+            st->cand[i].firstTick = 0;      // consumed by the promotion
+            return DOH_ROT_PROMOTE;
+        }
+        return DOH_ROT_PENDING;
+    }
+    // A new key takes a free slot, else evicts the oldest candidate.
+    int slot = 0;
+    for (int i = 0; i < DOH_ROT_CANDIDATES; i++) {
+        if (st->cand[i].firstTick == 0) { slot = i; break; }
+        if (st->cand[i].firstTick < st->cand[slot].firstTick) slot = i;
+    }
+    memcpy(st->cand[slot].spki, spki, 32);
+    st->cand[slot].firstTick = nowTick ? nowTick : 1;
+    if (outAgeMs) *outAgeMs = 0;
+    return DOH_ROT_NEW;
+}
+
+static int doh_note_failure_locked(DohResolverState *st, uint64_t nowTick) {
+    if (++st->consecutiveFailures >= DOH_BACKOFF_AFTER_FAILURES) {
+        st->consecutiveFailures = 0;
+        st->backoffUntilTick = nowTick + DOH_BACKOFF_MS;
+        return 1;
+    }
+    return 0;
+}
+
+static int doh_backed_off_locked(const DohResolverState *st, uint64_t nowTick) {
+    return st->backoffUntilTick != 0 && nowTick < st->backoffUntilTick;
+}
+
+static int doh_resolver_backed_off(const DnsResolver *r) {
+    DohResolverState *st = res_state(r);
+    EnterCriticalSection(&g_resCs);
+    int off = doh_backed_off_locked(st, GetTickCount64());
+    LeaveCriticalSection(&g_resCs);
+    return off;
+}
+
+static void doh_note_failure(const DnsResolver *r) {
+    DohResolverState *st = res_state(r);
+    int entered;
+    EnterCriticalSection(&g_resCs);
+    entered = doh_note_failure_locked(st, GetTickCount64());
+    LeaveCriticalSection(&g_resCs);
+    if (entered) {
+        Log_Append("dns: %s backing off for %llu min after %d consecutive failures",
+                   r->label, (unsigned long long)(DOH_BACKOFF_MS / 60000ULL),
+                   DOH_BACKOFF_AFTER_FAILURES);
+    }
+}
+
+static void doh_note_success(const DnsResolver *r) {
+    DohResolverState *st = res_state(r);
+    int recovered = 0;
+    EnterCriticalSection(&g_resCs);
+    st->consecutiveFailures = 0;
+    if (st->backoffUntilTick != 0) { st->backoffUntilTick = 0; recovered = 1; }
+    LeaveCriticalSection(&g_resCs);
+    if (recovered) Log_Append("dns: %s back in service", r->label);
+}
+
+// "local pin match" is proof of the security posture, but per connection
+// it is pure repetition: log it on the first match of the run and then at
+// most hourly per resolver.
+static void doh_log_pin_match(const DnsResolver *r, const PinRecord *pin,
+                              const char *peer_spki_hex) {
+    DohResolverState *st = res_state(r);
+    uint64_t now = GetTickCount64();
+    int emit = 0;
+    EnterCriticalSection(&g_resCs);
+    if (st->lastMatchLogTick == 0 ||
+        now - st->lastMatchLogTick >= DOH_PIN_MATCH_LOG_INTERVAL_MS) {
+        st->lastMatchLogTick = now ? now : 1;
+        emit = 1;
+    }
+    LeaveCriticalSection(&g_resCs);
+    if (emit) {
+        Log_Append("dns: %s local pin match host=%s spki=%s (%u enrolled) newest valid=%s..%s nextCa=%s",
+                   r->label, r->hostname, peer_spki_hex,
+                   (unsigned)pin->spki_count,
+                   pin->not_before, pin->not_after,
+                   pin->renewal_due[0] ? pin->renewal_due : "unknown");
+    }
+}
+
+// While a rotation candidate awaits corroboration the leaf matches no pin,
+// so every connection takes the CA path and would log its acceptance. Log
+// the first acceptance per resolver, any change of key, every non-accepted
+// outcome, and otherwise at most hourly.
+static int doh_should_log_ca(const DnsResolver *r, const char *spki_hex,
+                             int accepted) {
+    if (!accepted) return 1;
+    DohResolverState *st = res_state(r);
+    uint64_t now = GetTickCount64();
+    const char *hex = spki_hex ? spki_hex : "";
+    int emit = 0;
+    EnterCriticalSection(&g_resCs);
+    if (st->lastCaLogTick == 0 ||
+        now - st->lastCaLogTick >= DOH_PIN_MATCH_LOG_INTERVAL_MS ||
+        strcmp(st->lastCaSpkiHex, hex) != 0) {
+        st->lastCaLogTick = now ? now : 1;
+        _snprintf(st->lastCaSpkiHex, sizeof st->lastCaSpkiHex, "%s", hex);
+        st->lastCaSpkiHex[sizeof st->lastCaSpkiHex - 1] = 0;
+        emit = 1;
+    }
+    LeaveCriticalSection(&g_resCs);
+    return emit;
+}
+
+// A non-200 HTTP status is otherwise invisible ("3 consecutive failures"
+// says nothing about WHY): log the first per resolver, then hourly.
+static int doh_should_log_diag(const DnsResolver *r) {
+    DohResolverState *st = res_state(r);
+    uint64_t now = GetTickCount64();
+    int emit = 0;
+    EnterCriticalSection(&g_resCs);
+    if (st->lastDiagLogTick == 0 ||
+        now - st->lastDiagLogTick >= DOH_PIN_MATCH_LOG_INTERVAL_MS) {
+        st->lastDiagLogTick = now ? now : 1;
+        emit = 1;
+    }
+    LeaveCriticalSection(&g_resCs);
+    return emit;
+}
+
+// An out-of-window, CA-valid rotation: record/advance the candidate and
+// persist once corroborated by a second sighting >= 10 min later.
+static void doh_rotation_candidate(const DnsResolver *r,
+                                   const CertVerifyWinResult *cert,
+                                   const PinRecord *pin) {
+    DohResolverState *st = res_state(r);
+    uint64_t ageMs = 0;
+    int verdict;
+    EnterCriticalSection(&g_resCs);
+    verdict = doh_rotation_observe_locked(st, cert->spki_sha256,
+                                          GetTickCount64(), &ageMs);
+    LeaveCriticalSection(&g_resCs);
+    switch (verdict) {
+    case DOH_ROT_NEW:
+        Log_Append("dns: %s pin ROTATION observed outside renewal window host=%s newSpki=%s storedNewest=%s; answers used, enrollment deferred until the same key is seen again in >= %llu min",
+                   r->label, r->hostname, cert->spki_hex, pin->spki_hex,
+                   (unsigned long long)(DOH_ROTATION_CORROBORATE_MS / 60000ULL));
+        break;
+    case DOH_ROT_PROMOTE:
+        PinStore_SavePin(PIN_ENDPOINT_DOH, r->label, r->hostname, 443,
+                         r->operator_family, cert->spki_sha256, cert->spki_hex,
+                         cert->not_before, cert->not_after,
+                         cert->not_before_unix, cert->not_after_unix,
+                         "pin-rotation-corroborated");
+        Log_Append("dns: %s PIN ROTATION ACCEPTED host=%s spki=%s valid=%s..%s (same CA-valid key seen again after %llu min)",
+                   r->label, r->hostname, cert->spki_hex,
+                   cert->not_before, cert->not_after,
+                   (unsigned long long)(ageMs / 60000ULL));
+        break;
+    default:
+        break;   // pending: quiet
+    }
+}
+
+#ifdef LUNAR_TESTING
+// Test hooks over the pure decision cores (no I/O, caller-supplied ticks).
+int Dns_TestObserveRotation(size_t resolverIdx, const uint8_t spki[32],
+                            uint64_t nowTick) {
+    if (resolverIdx >= DNS_POOL_SIZE) return -1;
+    res_state(&kResolvers[resolverIdx]);
+    EnterCriticalSection(&g_resCs);
+    int v = doh_rotation_observe_locked(&g_resState[resolverIdx], spki,
+                                        nowTick, NULL);
+    LeaveCriticalSection(&g_resCs);
+    return v;
+}
+int Dns_TestNoteFailure(size_t resolverIdx, uint64_t nowTick) {
+    if (resolverIdx >= DNS_POOL_SIZE) return -1;
+    res_state(&kResolvers[resolverIdx]);
+    EnterCriticalSection(&g_resCs);
+    int entered = doh_note_failure_locked(&g_resState[resolverIdx], nowTick);
+    LeaveCriticalSection(&g_resCs);
+    return entered;
+}
+int Dns_TestBackedOff(size_t resolverIdx, uint64_t nowTick) {
+    if (resolverIdx >= DNS_POOL_SIZE) return -1;
+    res_state(&kResolvers[resolverIdx]);
+    EnterCriticalSection(&g_resCs);
+    int off = doh_backed_off_locked(&g_resState[resolverIdx], nowTick);
+    LeaveCriticalSection(&g_resCs);
+    return off;
+}
+void Dns_TestResetResolverState(void) {
+    res_state(&kResolvers[0]);
+    EnterCriticalSection(&g_resCs);
+    memset(g_resState, 0, sizeof g_resState);
+    LeaveCriticalSection(&g_resCs);
+}
+#endif
 
 // Encode a hostname as a length-prefixed label sequence into buf.
 // Returns bytes written (including the terminating 0), or 0 on error.
@@ -614,36 +890,44 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
     PinRecord pin;
     int have_pin = PinStore_GetPin(PIN_ENDPOINT_DOH, r->label, r->hostname,
                                    443, &pin);
-    int renew_due = have_pin ? PinStore_ShouldRenew(&pin) : 1;
-    int expired = have_pin ? PinStore_IsExpired(&pin) : 1;
-    int allow_ca = !have_pin || renew_due || expired;
+    // The endpoint's usable pins: every stored, un-expired SPKI (multi-POP
+    // and overlapping-rotation providers legitimately present more than
+    // one key); a leaf matching ANY of them is an enrolled pin.
+    uint8_t pin_set[PIN_STORE_MAX_SPKIS][32];
+    size_t n_pins = have_pin ? PinStore_CollectValidSpkis(&pin, pin_set) : 0;
+    int usable = n_pins > 0;
+    int renew_due = usable ? PinStore_ShouldRenew(&pin) : 1;
     if (!have_pin) {
         Log_Append("dns: %s first-run enrollment required for %s:%u",
                    r->label, r->hostname, 443u);
-    } else if (expired) {
-        Log_Append("dns: %s local pin expired; CA revalidation required (valid=%s..%s nextCa=%s)",
-                   r->label, pin.not_before, pin.not_after,
+    } else if (!usable) {
+        Log_Append("dns: %s all %u local pin(s) expired; CA revalidation required (newest valid=%s..%s nextCa=%s)",
+                   r->label, (unsigned)pin.spki_count,
+                   pin.not_before, pin.not_after,
                    pin.renewal_due[0] ? pin.renewal_due : "unknown");
     } else if (renew_due) {
-        Log_Append("dns: %s scheduled CA renewal due (valid=%s..%s nextCa=%s nextCaUnix=%lld)",
-                   r->label, pin.not_before, pin.not_after,
+        Log_Append("dns: %s scheduled CA renewal due (pins=%u newest valid=%s..%s nextCa=%s nextCaUnix=%lld)",
+                   r->label, (unsigned)n_pins, pin.not_before, pin.not_after,
                    pin.renewal_due[0] ? pin.renewal_due : "unknown",
                    (long long)pin.renewal_due_unix);
     }
 
+    // CA fallback stays enabled even for an out-of-window mismatch (the
+    // nts.c policy): an early key rotation is CA-validated and, if valid,
+    // used as a rotation candidate instead of being hard-rejected until the
+    // pinned certificate's own renewal window opens -- which for operators
+    // that rotate early could mean weeks of a dead resolver.
     static const char *alpn_list[] = { "http/1.1", NULL };
     PinnedTlsOpenResult openInfo;
-    if (PinnedTls_OpenEnrolled(&tls, s, r->hostname, alpn_list,
-                               (have_pin && !expired) ? pin.spki : NULL,
-                               allow_ca, renew_due && !expired, &openInfo) != 0) {
-        if (openInfo.pin_mismatched && !allow_ca) {
-            Log_Append("dns: %s pin mismatch before renewal window; endpoint rejected without CA refresh (peer_spki=%s stored_spki=%s stored_valid=%s..%s nextCa=%s)",
-                       r->label, openInfo.peer_spki_hex, pin.spki_hex,
-                       pin.not_before, pin.not_after,
-                       pin.renewal_due[0] ? pin.renewal_due : "unknown");
-        } else if (openInfo.ca_attempted) {
-            Log_Append("dns: %s CA validation rejected host=%s chain=0x%lx policy=0x%lx revocation=%s subject=\"%s\" issuer=\"%s\" spki=%s",
+    if (PinnedTls_OpenEnrolledSet(&tls, s, r->hostname, alpn_list,
+                                  usable ? (const uint8_t (*)[32])pin_set : NULL,
+                                  n_pins, 1 /* allow CA */,
+                                  usable && renew_due, &openInfo) != 0) {
+        if (openInfo.ca_attempted) {
+            Log_Append("dns: %s CA validation rejected host=%s%s chain=0x%lx policy=0x%lx revocation=%s subject=\"%s\" issuer=\"%s\" spki=%s",
                        r->label, r->hostname,
+                       openInfo.pin_mismatched
+                           ? " (pin mismatch; unvalidated rotation refused)" : "",
                        (unsigned long)openInfo.cert.chain_error_status,
                        (unsigned long)openInfo.cert.policy_error,
                        openInfo.cert.revocation_offline ? "offline" :
@@ -655,6 +939,7 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
     }
     const char *neg = PinnedTls_NegotiatedAlpn(&tls);
     if (openInfo.ca_attempted) {
+        if (doh_should_log_ca(r, openInfo.cert.spki_hex, openInfo.ca_valid))
         Log_Append("dns: %s CA validation %s host=%s alpn=%s subject=\"%s\" issuer=\"%s\" notBefore=%s notAfter=%s spki=%s revocation=%s chain=0x%lx policy=0x%lx",
                    r->label, openInfo.ca_valid ? "accepted" : "failed-but-pin-still-valid",
                    r->hostname, neg ? neg : "(none)",
@@ -666,25 +951,27 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
                    (unsigned long)openInfo.cert.chain_error_status,
                    (unsigned long)openInfo.cert.policy_error);
         if (openInfo.ca_valid) {
-            const char *status = have_pin
-                ? (expired ? "expired-renewal" :
-                   (openInfo.pin_matched ? "scheduled-renewal" : "pin-rotation"))
-                : "first-run-enrollment";
-            PinStore_SavePin(PIN_ENDPOINT_DOH, r->label, r->hostname, 443,
-                             r->operator_family,
-                             openInfo.cert.spki_sha256,
-                             openInfo.cert.spki_hex,
-                             openInfo.cert.not_before,
-                             openInfo.cert.not_after,
-                             openInfo.cert.not_before_unix,
-                             openInfo.cert.not_after_unix,
-                             status);
+            if (usable && !openInfo.pin_matched && !renew_due) {
+                // Early/emergency rotation: use this session's answer, but
+                // enroll the key only on a corroborating second sighting.
+                doh_rotation_candidate(r, &openInfo.cert, &pin);
+            } else {
+                const char *status = !usable
+                    ? (have_pin ? "expired-renewal" : "first-run-enrollment")
+                    : (openInfo.pin_matched ? "scheduled-renewal" : "pin-rotation");
+                PinStore_SavePin(PIN_ENDPOINT_DOH, r->label, r->hostname, 443,
+                                 r->operator_family,
+                                 openInfo.cert.spki_sha256,
+                                 openInfo.cert.spki_hex,
+                                 openInfo.cert.not_before,
+                                 openInfo.cert.not_after,
+                                 openInfo.cert.not_before_unix,
+                                 openInfo.cert.not_after_unix,
+                                 status);
+            }
         }
     } else if (openInfo.pin_matched) {
-        Log_Append("dns: %s local pin match host=%s spki=%s valid=%s..%s nextCa=%s",
-                   r->label, r->hostname, pin.spki_hex,
-                   pin.not_before, pin.not_after,
-                   pin.renewal_due[0] ? pin.renewal_due : "unknown");
+        doh_log_pin_match(r, &pin, openInfo.peer_spki_hex);
     }
     mbedtls_ssl_context *ssl = PinnedTls_Ssl(&tls);
 
@@ -747,7 +1034,18 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
     // simply locate the end of headers and take everything after.
     if (reply_len < 16) goto cleanup;
     if (memcmp(reply, "HTTP/1.1 200", 12) != 0 &&
-        memcmp(reply, "HTTP/1.0 200", 12) != 0) goto cleanup;
+        memcmp(reply, "HTTP/1.0 200", 12) != 0) {
+        // Name the status: a server that only speaks HTTP/2 answers 505 to
+        // every query and would otherwise hide behind the failure count.
+        if (doh_should_log_diag(r)) {
+            size_t sl = 0;
+            while (sl < reply_len && sl < 48 &&
+                   reply[sl] != '\r' && reply[sl] != '\n') sl++;
+            Log_Append("dns: %s host=%s answered \"%.*s\" (not 200); counted as a resolver failure",
+                       r->label, r->hostname, (int)sl, (const char *)reply);
+        }
+        goto cleanup;
+    }
 
     // Hand-roll a search for "\r\n\r\n"; memmem isn't in msvcrt.
     size_t hdr_end = 0;
@@ -766,11 +1064,22 @@ static int doh_query_one(const DnsResolver *r, const char *ip_str,
     uint32_t min_ttl = 0;
     int pr = Dns_ParseResponse(body, body_len, qid, host, qtype,
                                out_ips, ips_cap, &n, &min_ttl);
-    if (pr != 0 || n == 0) goto cleanup;
-
-    *out_count   = n;
-    if (out_min_ttl) *out_min_ttl = min_ttl;
-    rc = 0;
+    int rcode = body[3] & 0x0F;
+    if (pr == 0 && n > 0) {
+        *out_count   = n;
+        if (out_min_ttl) *out_min_ttl = min_ttl;
+        rc = 0;
+    } else if (pr == 0 || (pr == -2 && rcode == 3 /* NXDOMAIN */)) {
+        // A well-formed "nothing here" (NODATA for this qtype, NXDOMAIN):
+        // the resolver is in service and has spoken; neither its other
+        // addresses nor the rest of the pool would say otherwise.
+        rc = DOH_ANSWERED_EMPTY;
+    } else if (pr == -2) {
+        // SERVFAIL / REFUSED / ...: in service, but no answer from here.
+        rc = DOH_ANSWERED_ERROR;
+    } else {
+        goto cleanup;   // malformed or cross-wired reply: a real failure
+    }
 
     PinnedTls_CloseNotify(&tls);
 
@@ -804,12 +1113,18 @@ static int doh_query_resolver(const DnsResolver *r, const char *host,
         for (int i = 0; i < 2; i++) {
             const char *ip = order[grp][i];
             if (!ip) continue;
-            if (doh_query_one(r, ip, host, qid, qtype,
-                              out_ips, ips_cap, out_count, out_min_ttl) == 0) {
-                return 0;
+            int q = doh_query_one(r, ip, host, qid, qtype,
+                                  out_ips, ips_cap, out_count, out_min_ttl);
+            if (q >= 0) {
+                // Any well-formed DNS answer -- records, NODATA, even
+                // SERVFAIL -- is a resolver in service; only transport, TLS,
+                // HTTP and malformed replies count toward the back-off.
+                doh_note_success(r);
+                return q;
             }
         }
     }
+    doh_note_failure(r);
     return -1;
 }
 
@@ -823,7 +1138,8 @@ static int doh_query_resolver(const DnsResolver *r, const char *host,
 // each resolver until one returns a record of `qtype`. Writes the first
 // address to out_ip and its TTL to *out_ttl. Returns 0 / -1.
 static int doh_resolve_qtype(const char *host, uint16_t qtype,
-                             char *out_ip, uint32_t *out_ttl)
+                             char *out_ip, uint32_t *out_ttl,
+                             const char **out_via)
 {
     const DnsResolver *picked[DNS_POOL_SIZE] = { NULL };
     size_t got = Dns_PickResolvers(picked, DNS_POOL_SIZE);
@@ -833,23 +1149,39 @@ static int doh_resolve_qtype(const char *host, uint16_t qtype,
     }
 
     char ips[DNS_ANSWERS_MAX][NET_IP_STRLEN];
-    for (size_t i = 0; i < got; i++) {
-        // Fresh QID per DoH query. DoH doesn't require it (the TLS
-        // channel already defeats off-path spoofing) but it costs
-        // nothing and lets us reject cross-wired responses.
-        uint16_t qid = 0;
-        BCryptGenRandom(NULL, (PUCHAR)&qid, sizeof qid,
-                        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    // Two passes: healthy resolvers first, then -- only if every one of
+    // them failed -- the backed-off ones too, so a back-off can never
+    // strand a lookup.
+    for (int pass = 0; pass < 2; pass++) {
+        int skipped = 0;
+        for (size_t i = 0; i < got; i++) {
+            int off = doh_resolver_backed_off(picked[i]);
+            if (pass == 0 && off) { skipped++; continue; }
+            if (pass == 1 && !off) continue;
+            // Fresh QID per DoH query. DoH doesn't require it (the TLS
+            // channel already defeats off-path spoofing) but it costs
+            // nothing and lets us reject cross-wired responses.
+            uint16_t qid = 0;
+            BCryptGenRandom(NULL, (PUCHAR)&qid, sizeof qid,
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 
-        size_t   n_ips = 0;
-        uint32_t ttl   = 0;
-        if (doh_query_resolver(picked[i], host, qid, qtype,
-                               ips, DNS_ANSWERS_MAX, &n_ips, &ttl) == 0 &&
-            n_ips > 0) {
-            _snprintf(out_ip, NET_IP_STRLEN, "%s", ips[0]);
-            if (out_ttl) *out_ttl = ttl;
-            return 0;
+            size_t   n_ips = 0;
+            uint32_t ttl   = 0;
+            int q = doh_query_resolver(picked[i], host, qid, qtype,
+                                       ips, DNS_ANSWERS_MAX, &n_ips, &ttl);
+            if (q == 0 && n_ips > 0) {
+                _snprintf(out_ip, NET_IP_STRLEN, "%s", ips[0]);
+                if (out_ttl) *out_ttl = ttl;
+                if (out_via) *out_via = picked[i]->label;
+                return 0;
+            }
+            // A pinned resolver's "no such record" is as authoritative as
+            // its positive answers: walking the rest of the pool for the
+            // same NODATA costs a TLS handshake per resolver and finds
+            // nothing (the caller moves on to the other address family).
+            if (q == DOH_ANSWERED_EMPTY) return -1;
         }
+        if (pass == 0 && skipped == 0) break;   // nothing left to try
     }
     return -1;
 }
@@ -896,20 +1228,21 @@ int Dns_ResolveEx(const char *host, char *out_ip, int *out_family)
     int      next_af  = prefer6 ? AF_INET       : AF_INET6;
 
     uint32_t ttl = 0;
-    if (doh_resolve_qtype(host, first_qt, out_ip, &ttl) == 0) {
+    const char *via = "?";
+    if (doh_resolve_qtype(host, first_qt, out_ip, &ttl, &via) == 0) {
         cache_insert(host, out_ip, first_af, ttl);
         if (out_family) *out_family = first_af;
-        Log_Append("dns: resolve %s -> %s  (%s, ttl=%us)",
+        Log_Append("dns: resolve %s -> %s  (%s, ttl=%us, via %s)",
                    host, out_ip, first_af == AF_INET6 ? "AAAA" : "A",
-                   (unsigned)ttl);
+                   (unsigned)ttl, via);
         return 0;
     }
-    if (doh_resolve_qtype(host, next_qt, out_ip, &ttl) == 0) {
+    if (doh_resolve_qtype(host, next_qt, out_ip, &ttl, &via) == 0) {
         cache_insert(host, out_ip, next_af, ttl);
         if (out_family) *out_family = next_af;
-        Log_Append("dns: resolve %s -> %s  (%s, ttl=%us)",
+        Log_Append("dns: resolve %s -> %s  (%s, ttl=%us, via %s)",
                    host, out_ip, next_af == AF_INET6 ? "AAAA" : "A",
-                   (unsigned)ttl);
+                   (unsigned)ttl, via);
         return 0;
     }
 

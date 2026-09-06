@@ -19,6 +19,7 @@ namespace eval lunar {
     variable stopped_prev 0  ;# last rendered stop flag (recover-fast edge)
     variable hastime_prev 1  ;# last rendered hasTime (recover-fast edge)
     variable log_active 0    ;# reentry latch so logging can't recurse into bgerror
+    variable bgerror_count 0 ;# uncaught async errors this run (selftest gate)
     variable events {}       ;# unified event store: {wallMs trusted sev cat msg} each
     variable events_seq 0    ;# last engine ring seq ingested (lunar::log_events cursor)
     variable events_mem_max  10000   ;# in-memory history ceiling (events kept)
@@ -74,10 +75,17 @@ proc lunar::events_path {} { return [file join [lunar::datadir] events.log] }
 # level -- severity is lexical by convention there, so one classifier owns
 # the convention. UI-side events pass an explicit sev and skip this.
 proc lunar::events_classify {msg} {
-    if {[regexp -nocase {\*\*\*|unhandled exception|crash|INOP|pin mismatch|NOT accepted} $msg]} {
+    # Known-healthy templates first: they contain words the heuristics
+    # below would misread ("core timeout 6000ms" in the cycle banner,
+    # "anchorErr=" in every TRUST_OK line, "INOP" in the recovery line,
+    # "expired-renewal" as a pin's historical status).
+    if {[regexp {^(cycle start|cycle TRUST_OK|trust .* → OK|display .* → OK|loaded (doh|nts):|first anchor acquired|sync — residual|PIN ROTATION ACCEPTED)} $msg]} {
+        return info
+    }
+    if {[regexp -nocase {\*\*\*|unhandled exception|crash|TRUST_INOP|INOP latch|pin mismatch|NOT accepted|CA validation rejected|unvalidated rotation refused} $msg]} {
         return error
     }
-    if {[regexp -nocase {fail|error|rejected|refused|err=|timeout|expired|invalid|mismatch|deferr|NOTE|giving up|stale} $msg]} {
+    if {[regexp -nocase {\mfail|\merror|rejected|refused|\merr=|timeout|expired|invalid|mismatch|deferr|\mNOTE\M|giving up|stale|ROTATION observed|backing off|too uncertain} $msg]} {
         return warn
     }
     return info
@@ -297,6 +305,7 @@ proc lunar::log {msg} {
 proc lunar::status_note {m} { catch { .sb.sys configure -text $m -fg $::lunar::ACCENT } }
 proc lunar::bgerror {msg args} {
     if {$::lunar::log_active} return
+    incr ::lunar::bgerror_count   ;# the selftest fails on any nonzero count
     set trace $msg
     if {[llength $args]} { catch { set trace [dict get [lindex $args 0] -errorinfo] } }
     catch { lunar::ev error app $trace }
@@ -580,6 +589,9 @@ proc lunar::chime_check {curMin boundMs} {
         if {![lindex $::lunar::armed [expr {$mm / 5}]]} continue
         if {$chimes && [llength [info commands ::lunar::beep]]} { catch { ::lunar::beep } }
         if {$unmin && [wm state .] ne "normal"} { lunar::restore }
+        # the log should be able to answer "did it chime at :05?"
+        lunar::ev info chime [format "mark :%02d %s (bound ±%d ms)" $mm \
+            [expr {$chimes ? "chimed" : "reached, chimes off"}] $boundMs]
     }
 }
 
@@ -1074,7 +1086,7 @@ proc lunar::log_dlg {} {
     pack .log.inner.bar.copy -side right -padx {0 8}
 
     bind .log <Escape> {destroy .log}
-    bind .log <Destroy> { if {%W eq ".log"} { lunar::log_cleanup } }
+    bind .log <Destroy> { if {"%W" eq ".log"} { lunar::log_cleanup } }
     catch { after cancel $::lunar::log_loop_after }
     set ::lunar::log_loop_after [after 1000 lunar::log_refresh_loop]
 }
@@ -1573,7 +1585,7 @@ proc lunar::settings_dlg {{tab ""}} {
     trace add variable ::lunar::set_filter write ::lunar::settings_filter_changed
     bind .set.shell.tabs.clock.inner.zl.list <<ListboxSelect>> lunar::settings_zone_selected
     bind .set <Escape> { lunar::settings_close }
-    bind .set <Destroy> { if {%W eq ".set"} { lunar::settings_cleanup } }
+    bind .set <Destroy> { if {"%W" eq ".set"} { lunar::settings_cleanup } }
     wm protocol .set WM_DELETE_WINDOW lunar::settings_close
     lunar::settings_fill
     if {$tab ne ""} { catch { .set.shell.tabs select .set.shell.tabs.$tab } }
@@ -2172,6 +2184,12 @@ proc lunar::selftest {reportPath} {
         catch { file delete -force $tmp }
     }
     append txt "eventlog=$eg\n"
+    # Any uncaught async error during the gates is a defect (the %W binding
+    # bug hid behind status=ok for weeks this way): fail the selftest on it.
+    append txt "bgerrors=$::lunar::bgerror_count\n"
+    if {$::lunar::bgerror_count > 0 && $ok} {
+        set ok 0 ; set msg "$::lunar::bgerror_count uncaught error(s) during selftest (see events.log)"
+    }
     append txt "status=[expr {$ok ? {ok} : {FAIL}}]\n"
     if {!$ok} { append txt "error=$msg\n" }
     if {$reportPath ne ""} {

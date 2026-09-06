@@ -79,6 +79,26 @@ static TrustState g_lastObservedState = TRUST_INOP;
 // faults and the clockwork snaps to it (prominent TIME STEP log).
 static int        g_consecutiveLocalFaults = 0;
 #define LOCAL_FAULT_ESCAPE_N  3
+// A fault streak must be CONSISTENT to count: same sign, and each new
+// disagreement within a factor of two of the streak's first. Congestion
+// produces disagreements that flip sign and swing by an order of
+// magnitude between cycles; a genuinely wrong local anchor/rate produces
+// the same offset every cycle.
+static int        g_faultStreakSign = 0;
+static int64_t    g_faultStreakMag  = 0;
+// Below this the sample's own uncertainty (anchorErr) never excuses a
+// disagreement -- matches the fixed 200 ms fault threshold.
+#define FAULT_EVIDENCE_FLOOR_MS  200
+// An accepted sample whose uncertainty exceeds this holds the rate
+// integrator. Set above the far-anchor regime (a transatlantic NTS member
+// puts anchorErr at 120-160 ms while its residuals stay within a few ms)
+// and below congestion (anchorErr past 300 ms with residuals of hundreds
+// of ms -- a sample that cannot say anything useful about ppm).
+#define RATE_EVIDENCE_MAX_MS     250
+// The per-cycle rate clamp scales with the measurement interval, reaching
+// PER_CYCLE_RATE_CLAMP_PPM at this interval: at 60 s a few ms of network
+// noise reads as ~100 ppm and would otherwise thrash the rate ±20 ppm.
+#define RATE_CLAMP_FULL_INTERVAL_MS 600000
 
 // --- Display-derivation constants ------------------------------------------
 //
@@ -283,6 +303,8 @@ void Clock_Init(void) {
     g_faultInflateMs = 0;
     g_lastObservedState = TRUST_INOP;
     g_consecutiveLocalFaults = 0;
+    g_faultStreakSign = 0;
+    g_faultStreakMag  = 0;
     g_displayGeneration++;
     if (g_displayGeneration == 0) g_displayGeneration = 1;
 
@@ -409,6 +431,8 @@ void Clock_OnSyncedNtpUtc(int64_t ntpUtcMs, int64_t localQpc) {
     int32_t oldRate = 0, newRate = 0;
     int64_t errorMs = 0;
     int     rateMeasured = 0;       // did this cycle refresh the rate?
+    int     rateHeldUncertain = 0;  // sample too uncertain to steer the rate
+    int     rateClampPpm = PER_CYCLE_RATE_CLAMP_PPM;
     int64_t staleAgeDays = 0;       // only meaningful when ev==EV_FIRST_STALE
     int64_t nowTick64 = (int64_t)GetTickCount64();
 
@@ -484,16 +508,25 @@ void Clock_OnSyncedNtpUtc(int64_t ntpUtcMs, int64_t localQpc) {
         // PI rate update: integral term on residual-rate.
         int64_t dqpc   = localQpc - g_lastSyncQpc;
         int64_t elapMs = (dqpc * 1000LL + g_qpcFreq / 2) / g_qpcFreq;
-        if (elapMs > 30000) {
+        // A sample too uncertain to say anything about ppm holds the
+        // integrator (the phase still re-anchors below).
+        rateHeldUncertain = g_pendingAnchorErrMs > RATE_EVIDENCE_MAX_MS;
+        if (elapMs > 30000 && !rateHeldUncertain) {
             // observed_ppm = residual rate error (X - R_old) in ppm.
             int64_t observed_ppm = (error * 1000000LL) / elapMs;
             // Integral step: gentle gain (Ki = 1/8).
             int64_t delta = (observed_ppm * KI_NUM) / KI_DEN;
-            // Per-cycle change clamp: a single measurement can never
-            // swing the rate by more than PER_CYCLE_RATE_CLAMP_PPM.
-            // This is the anti-oscillation safety net.
-            if (delta >  PER_CYCLE_RATE_CLAMP_PPM) delta =  PER_CYCLE_RATE_CLAMP_PPM;
-            if (delta < -PER_CYCLE_RATE_CLAMP_PPM) delta = -PER_CYCLE_RATE_CLAMP_PPM;
+            // Per-cycle change clamp, scaled with the interval: a single
+            // measurement can never swing the rate by more than
+            // PER_CYCLE_RATE_CLAMP_PPM, and over short intervals -- where
+            // a few ms of network noise reads as ~100 ppm -- by far less.
+            int64_t clamp = (PER_CYCLE_RATE_CLAMP_PPM * elapMs
+                             + RATE_CLAMP_FULL_INTERVAL_MS / 2)
+                            / RATE_CLAMP_FULL_INTERVAL_MS;
+            if (clamp < 1) clamp = 1;
+            if (clamp > PER_CYCLE_RATE_CLAMP_PPM) clamp = PER_CYCLE_RATE_CLAMP_PPM;
+            if (delta >  clamp) delta =  clamp;
+            if (delta < -clamp) delta = -clamp;
             int32_t target = (int32_t)(g_ratePpm + delta);
             // Absolute rate clamp.
             if (target >  RATE_CLAMP_PPM) target =  RATE_CLAMP_PPM;
@@ -501,6 +534,7 @@ void Clock_OnSyncedNtpUtc(int64_t ntpUtcMs, int64_t localQpc) {
             g_ratePpm  = target;
             g_haveRate = 1;
             rateMeasured = 1;
+            rateClampPpm = (int)clamp;
         }
         newRate = g_ratePpm;
 
@@ -562,12 +596,14 @@ void Clock_OnSyncedNtpUtc(int64_t ntpUtcMs, int64_t localQpc) {
                        (long long)errorMs, adj,
                        (int)oldRate, (int)newRate,
                        (int)(newRate - oldRate),
-                       PER_CYCLE_RATE_CLAMP_PPM);
+                       rateClampPpm);
         } else {
             Log_Append("clock: sync \xe2\x80\x94"
-                       " residual %+lldms  adj=%s  rate %+d ppm "
-                       "(interval too short to re-measure)",
-                       (long long)errorMs, adj, (int)newRate);
+                       " residual %+lldms  adj=%s  rate %+d ppm (%s)",
+                       (long long)errorMs, adj, (int)newRate,
+                       rateHeldUncertain
+                           ? "sample too uncertain to steer the rate"
+                           : "interval too short to re-measure");
         }
         break;
     }
@@ -616,6 +652,7 @@ void Clock_OnPollCycle(TrustState state,
     TrustState prevPublished;
     int64_t    faultDiffMs = 0;
     int        faultCount  = 0;
+    int        faultUncertain = 0;   // disagreement within the sample's own error
 
     EnterCriticalSection(&g_cs);
     prevPublished = g_trust;
@@ -624,6 +661,7 @@ void Clock_OnPollCycle(TrustState state,
             // First anchor of the run, or the authenticated re-anchor that
             // ends a REACQUIRING episode. Nothing to cross-check against.
             g_consecutiveLocalFaults = 0;
+            g_faultStreakSign = 0;
             verdict = CYCLE_ACCEPT;
         } else {
             int64_t predicted = ProjectLocked(bestQpc);
@@ -631,25 +669,58 @@ void Clock_OnPollCycle(TrustState state,
             int64_t absDiff   = diff < 0 ? -diff : diff;
             if (absDiff > 200) {
                 faultDiffMs = diff;
-                faultCount  = ++g_consecutiveLocalFaults;
-                if (faultCount >= LOCAL_FAULT_ESCAPE_N) {
-                    // N consecutive cycles where all gating sources
-                    // concurred but we rejected them: OUR state
-                    // (anchor/rate) is the broken party, not the network.
-                    g_consecutiveLocalFaults = 0;
-                    verdict = CYCLE_ESCAPE;
-                } else {
-                    // Keep displaying, but publish HOLDOVER with the bound
-                    // inflated to honestly cover the disagreement.
+                // Evidence test: a sample whose own measured uncertainty
+                // covers the disagreement cannot indict our projection
+                // (congestion: RTTs of seconds, offsets of hundreds of ms).
+                // It is neither accepted nor counted; the display holds
+                // with the bound inflated.
+                int64_t evidence = anchorErrMs > FAULT_EVIDENCE_FLOOR_MS
+                                   ? anchorErrMs : FAULT_EVIDENCE_FLOOR_MS;
+                if (absDiff <= evidence) {
+                    faultUncertain = 1;
+                    faultCount = g_consecutiveLocalFaults;
                     g_faultInflateMs = absDiff;
                     if (g_trust != TRUST_HOLDOVER) {
                         g_trust = TRUST_HOLDOVER;
                         BumpGenerationLocked();
                     }
                     verdict = CYCLE_FAULT_HOLD;
+                } else {
+                    // Consistency test: a streak restarts when the sign
+                    // flips or the magnitude leaves [1/2, 2] x the first.
+                    int sign = diff < 0 ? -1 : 1;
+                    if (g_consecutiveLocalFaults > 0 &&
+                        (sign != g_faultStreakSign ||
+                         absDiff * 2 < g_faultStreakMag ||
+                         absDiff > g_faultStreakMag * 2)) {
+                        g_consecutiveLocalFaults = 0;
+                    }
+                    if (g_consecutiveLocalFaults == 0) {
+                        g_faultStreakSign = sign;
+                        g_faultStreakMag  = absDiff;
+                    }
+                    faultCount = ++g_consecutiveLocalFaults;
+                    if (faultCount >= LOCAL_FAULT_ESCAPE_N) {
+                        // N consecutive, consistent cycles where all gating
+                        // sources concurred but we rejected them: OUR state
+                        // (anchor/rate) is the broken party, not the network.
+                        g_consecutiveLocalFaults = 0;
+                        g_faultStreakSign = 0;
+                        verdict = CYCLE_ESCAPE;
+                    } else {
+                        // Keep displaying, but publish HOLDOVER with the
+                        // bound inflated to honestly cover the disagreement.
+                        g_faultInflateMs = absDiff;
+                        if (g_trust != TRUST_HOLDOVER) {
+                            g_trust = TRUST_HOLDOVER;
+                            BumpGenerationLocked();
+                        }
+                        verdict = CYCLE_FAULT_HOLD;
+                    }
                 }
             } else {
                 g_consecutiveLocalFaults = 0;
+                g_faultStreakSign = 0;
                 verdict = CYCLE_ACCEPT;
             }
         }
@@ -683,11 +754,21 @@ void Clock_OnPollCycle(TrustState state,
         }
         return;
     case CYCLE_FAULT_HOLD:
-        Log_Append("clock: gate-passing consensus disagrees with our "
-                   "projection by %+lldms (>200ms) [%d/%d before forced "
-                   "re-anchor]; publishing HOLDOVER with inflated bound",
-                   (long long)faultDiffMs,
-                   faultCount, LOCAL_FAULT_ESCAPE_N);
+        if (faultUncertain) {
+            Log_Append("clock: gate-passing consensus disagrees with our "
+                       "projection by %+lldms, but its own uncertainty is "
+                       "\xc2\xb1%lldms -- not evidence against the projection "
+                       "(not counted; %d/%d); publishing HOLDOVER with "
+                       "inflated bound",
+                       (long long)faultDiffMs, (long long)anchorErrMs,
+                       faultCount, LOCAL_FAULT_ESCAPE_N);
+        } else {
+            Log_Append("clock: gate-passing consensus disagrees with our "
+                       "projection by %+lldms (>200ms) [%d/%d before forced "
+                       "re-anchor]; publishing HOLDOVER with inflated bound",
+                       (long long)faultDiffMs,
+                       faultCount, LOCAL_FAULT_ESCAPE_N);
+        }
         return;
     case CYCLE_ESCAPE:
     case CYCLE_ACCEPT:

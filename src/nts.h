@@ -91,6 +91,19 @@ size_t Nts_PickProviders(const NtsProvider **out, size_t n_want);
 // re-anchor never reuses a possibly-bad or stale-cookie pair.
 void Nts_ForceRepick(void);
 
+// Feed back a completed sample's round-trip time for `p`. The picker uses
+// a per-provider running RTT to draw NEAR providers first: the anchor
+// uncertainty carries worst-NTS-RTT/2, so a transatlantic anchor in the
+// pair inflates it enough to keep the poll cadence from ever relaxing.
+void Nts_ReportRtt(const NtsProvider *p, uint32_t rttMs);
+
+#ifdef LUNAR_TESTING
+// Test-only: the running RTT the picker holds for pool index `idx`
+// (0 = unknown), and a full reset of the RTT table + sticky set.
+uint32_t Nts_TestProviderRtt(size_t idx);
+void     Nts_TestResetPicker(void);
+#endif
+
 // Perform a full NTS-KE exchange:
 //   TCP connect -> TLS 1.3 handshake (ALPN "ntske/1") -> local SPKI
 //   pin match or Windows CA enrollment -> NTS-KE records -> TLS

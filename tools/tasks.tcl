@@ -282,9 +282,18 @@ proc task_check {args} {
     if {![file exists $exe]} { error "not found: $exe (run z build first)" }
     set report [file join [file dirname $exe] lunar-selftest.txt]
     file delete -force $report
+    # The selftest fires a chime, arms a marker and ingests events: run it
+    # against a scratch data dir so none of that lands in the user's real
+    # %APPDATA%\Lunar (events.log, settings, pin store).
+    set saveEnv [expr {[info exists ::env(LUNAR_DATA_DIR)] ? $::env(LUNAR_DATA_DIR) : ""}]
+    set tmp [file join $::env(TEMP) "lunar-check-[pid]"]
+    file mkdir $tmp
+    set ::env(LUNAR_DATA_DIR) $tmp
     lassign [run_capture $exe --selftest $report] rc out
     # GUI subsystem: the exe detaches; poll briefly for the report file.
     for {set i 0} {$i < 50 && ![file exists $report]} {incr i} { after 100 }
+    if {$saveEnv ne ""} { set ::env(LUNAR_DATA_DIR) $saveEnv } else { unset -nocomplain ::env(LUNAR_DATA_DIR) }
+    catch { file delete -force $tmp }
     if {![file exists $report]} { error "selftest produced no report (exe failed to run?)\n$out" }
     set fh [open $report r] ; set txt [read $fh] ; close $fh
     puts $txt

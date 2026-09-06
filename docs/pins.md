@@ -98,8 +98,10 @@ one of these statuses:
 - `scheduled-renewal`
 - `expired-renewal`
 - `pin-rotation` (mismatch inside the renewal window)
-- `rotation-corroborated` (mismatch outside the renewal window, promoted after
-  corroboration; see below)
+- `rotation-corroborated` (NTS: mismatch outside the renewal window, promoted after
+  corroboration by the other slot; see below)
+- `pin-rotation-corroborated` (DoH: mismatch outside the renewal window, promoted after
+  the same key is seen again ten minutes later; see below)
 
 ## Corroborated Rotation Acceptance (NTS)
 
@@ -127,6 +129,40 @@ that operator family until the stored pin's window opened. Instead, for NTS endp
 
    If the cycle does not pass, nothing is persisted and the next cycle starts from the
    same stored state.
+
+## Corroborated Rotation Acceptance (DoH)
+
+DoH resolvers have no second slot to corroborate against inside one exchange, and the
+large operators rotate their front-end leaf keys far more often than their certificates'
+validity suggests (Google was observed rotating roughly every 19 days on 90-day leaves,
+always outside the renewal window; Mullvad did the same before it left the pool for serving
+DoH over HTTP/2 only). Hard-rejecting such a leaf until the
+stored pin's window opened kept those resolvers dead for weeks and filled the event log with
+per-connection mismatch lines. DoH therefore corroborates a rotation over TIME instead:
+
+1. The presented leaf matches no stored, un-expired SPKI and the endpoint is not in its
+   renewal window.
+2. Lunar runs the full Windows CA + hostname validation path. If that fails, the connection
+   is rejected as before (`CA validation rejected`).
+3. If CA validation passes, the answers from this connection ARE used (DNS answers are not
+   trusted anyway: every NTS-KE handshake authenticates the address it resolves to), but the
+   new SPKI is only remembered as a *candidate* for that resolver, with the tick of its first
+   sighting.
+4. When the SAME key is presented again at least 10 minutes after that first sighting, the
+   candidate is promoted into the pin set (status `pin-rotation-corroborated`), with a
+   `PIN ROTATION ACCEPTED` line in the event and audit logs. Each resolver keeps two
+   candidate slots (an anycast provider can alternate between two POP keys); a further key
+   evicts the oldest candidate, so a flapping interposer never accumulates corroboration,
+   and a transient interposer that is gone ten minutes later is never enrolled.
+
+Independently of pinning, a resolver that fails three consecutive queries is backed off for
+one hour and skipped by the resolver walk unless every resolver in the pool is backed off.
+Only transport, TLS, HTTP and malformed replies count as failures: a well-formed DNS answer
+of any kind -- records, NODATA, NXDOMAIN, even SERVFAIL -- is a resolver in service (the
+AAAA lookup of an IPv4-only NTP host returns NODATA every time and must not look like a dead
+resolver). The first successful query afterwards puts it back in service; both edges are
+logged once, and a non-200 HTTP status is named in the log the first time (then hourly) so a
+resolver that only speaks HTTP/2 cannot hide behind the failure count.
 
 ## NTS Concurrence
 

@@ -41,7 +41,7 @@
 
 **Anchor.** On an `OK` cycle: the midpoint of the two agreeing operator-diverse NTS samples, projected to the selected QPC moment.
 
-**Rate discipline.** PI-style per-cycle rate correction with a ±20 ppm per-cycle delta clamp and ±200 ppm absolute clamp, persisted to `%APPDATA%\Lunar\discipline.dat` at shutdown, reloaded as bootstrap, rejected at > 30 days against *disciplined* UTC.
+**Rate discipline.** PI-style per-cycle rate correction with a per-cycle delta clamp that scales with the measurement interval (±20 ppm at the relaxed 600 s cadence, ±2 ppm at 60 s -- a few ms of network noise over a minute reads as ~100 ppm) and a ±200 ppm absolute clamp; a sample whose measured anchor uncertainty exceeds 250 ms (congestion, not merely a far anchor) holds the integrator. Persisted to `%APPDATA%\Lunar\discipline.dat` at shutdown, reloaded as bootstrap, rejected at > 30 days against *disciplined* UTC.
 
 **Residual handling.** Accepted residuals snap immediately to the newest trusted anchor. Lunar no longer displays cosmetically-slewed time; if the clock cannot present a freshly trusted value, it renders INOP.
 

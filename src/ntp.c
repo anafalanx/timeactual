@@ -548,6 +548,7 @@ static DWORD WINAPI NtsWorkerProc(LPVOID param) {
             r->qpcAtT4   = qpc;
             r->rttMs     = rtt;
             r->rootErrMs = rootErr;
+            Nts_ReportRtt(p, rtt);   // steers future draws toward near anchors
             r->offsetMs = utc;   // legacy field (overwritten with display value below)
             r->authMode = ctx->rot.pending ? NTP_AUTH_ROTATED_PIN
                                            : NTP_AUTH_ENROLLED_PIN;
@@ -1121,7 +1122,10 @@ static DWORD WINAPI AggregatorProc(LPVOID param) {
     if (trust != TRUST_OK && haveCluster) {
         Clock_OnCoreWitness(clusterUtc, clusterQpc);
     }
-    InterlockedExchange64(&g_lastSpreadMs, (LONG64)anchorErr);
+    // g_lastSpreadMs is published by Ntp_Concur itself: the core cluster's
+    // worst deviation from the authenticated anchor. It used to be
+    // overwritten here with anchorErr, whose worst-NTS-RTT/2 term let a
+    // transatlantic anchor pair silently veto the relaxed poll cadence.
 
     // One line to the audit log per cycle. Done after Clock_OnPollCycle
     // so the timestamp reflects the clockwork's *post-cycle* state
@@ -1286,9 +1290,11 @@ static int CountCoreConcurring(const NtpSourceResult results[NTP_SOURCE_COUNT],
                                int64_t refQpc,
                                int64_t qpcFreq,
                                int64_t *outWorstAbs,
-                               int64_t *outMedianConcurAbs) {
+                               int64_t *outMedianConcurAbs,
+                               int64_t *outWorstConcurAbs) {
     int concurring = 0;
     int64_t worst = 0;
+    int64_t worstConcur = 0;
     int64_t concurAbs[NTP_CORE_COUNT];
     for (int i = 0; i < NTP_CORE_COUNT; i++) {
         const NtpSourceResult *r = &results[i];
@@ -1298,9 +1304,13 @@ static int CountCoreConcurring(const NtpSourceResult results[NTP_SOURCE_COUNT],
         int64_t delta = projected - refUtc;
         int64_t absD  = delta < 0 ? -delta : delta;
         if (absD > worst) worst = absD;
-        if (absD <= CONCUR_THRESHOLD_MS) concurAbs[concurring++] = absD;
+        if (absD <= CONCUR_THRESHOLD_MS) {
+            concurAbs[concurring++] = absD;
+            if (absD > worstConcur) worstConcur = absD;
+        }
     }
     if (outWorstAbs) *outWorstAbs = worst;
+    if (outWorstConcurAbs) *outWorstConcurAbs = worstConcur;
     // Median deviation of the CONCURRING cores from the reference: an
     // independent (if unauthenticated) witness of the anchor's error.
     // Median, not mean or max, so one outlier core can neither dominate
@@ -1465,13 +1475,20 @@ TrustState Ntp_Concur(const NtpSourceResult results[NTP_SOURCE_COUNT],
         int64_t midUtc = a->ntpUtcMs + ntsDelta / 2;
         int64_t midQpc = a->qpcAtT4;
 
-        int64_t worstCore = 0, medianCore = 0;
+        int64_t worstCore = 0, medianCore = 0, spreadCore = 0;
         int coreConcur = CountCoreConcurring(results, midUtc, midQpc,
-                                             qpcFreq, &worstCore, &medianCore);
+                                             qpcFreq, &worstCore, &medianCore,
+                                             &spreadCore);
         if (coreConcur < 3) {
             if (outAnchorErrMs) *outAnchorErrMs = worstCore;
+            InterlockedExchange64(&g_lastSpreadMs, (LONG64)worstCore);
             return TRUST_INOP;   // need >= 3 of 4
         }
+        // The scheduler's convergence input: how far the CONCURRING cores
+        // sit from the authenticated anchor (worst of them). Pure agreement
+        // -- no RTT term -- so a far-away anchor cannot block relaxation
+        // while every source still agrees.
+        InterlockedExchange64(&g_lastSpreadMs, (LONG64)spreadCore);
 
         // --- Measured anchor uncertainty --------------------------------
         // The midpoint's worst-case error when the two anchors' errors have
@@ -1571,9 +1588,13 @@ void Ntp_Start(void) {
                NTP_SOURCE_COUNT, NTP_CORE_COUNT, NTP_NTS_COUNT,
                NTP_CORE_SLOT_ATTEMPTS, NTP_NTS_SLOT_ATTEMPTS,
                NTP_TIMEOUT_MS, NTS_SLOT_TIMEOUT_MS);
-    Log_Append("  core pool: %d curated stratum-1 servers "
-               "(national metrology / research labs); %d random picks per cycle",
-               (int)CORE_POOL_SIZE, NTP_CORE_COUNT);
+    // A per-process constant: say it once, not on every cycle.
+    static LONG s_poolLogged = 0;
+    if (InterlockedCompareExchange(&s_poolLogged, 1, 0) == 0) {
+        Log_Append("  core pool: %d curated stratum-1 servers "
+                   "(national metrology / research labs); %d random picks per cycle",
+                   (int)CORE_POOL_SIZE, NTP_CORE_COUNT);
+    }
 }
 
 void Ntp_Shutdown(void) {

@@ -20,21 +20,20 @@
 // Design
 // =============================================================================
 //
-// 1. All resolution goes through DNS-over-HTTPS (RFC 8484). Bootstrap
-//    is from a hardcoded table of 5 well-known resolvers, each
-//    identified by (a) a hardcoded anycast IPv4 address so we never
-//    need DNS to find the DNS, and (b) a pinned SHA-256(SPKI) of the
-//    TLS leaf certificate so a compromised CA cannot mint a trusted
-//    substitute.
+// 1. All resolution goes through DNS-over-HTTPS (RFC 8484) -- POST over
+//    HTTP/1.1, the only HTTP this client speaks (Quad9 and Mullvad serve
+//    DoH over HTTP/2 only and are therefore not in the pool). Bootstrap
+//    is from a hardcoded table of 3 well-known resolvers, each identified
+//    by (a) a hardcoded anycast IPv4 address so we never need DNS to find
+//    the DNS, and (b) a pinned SHA-256(SPKI) of the TLS leaf certificate
+//    so a compromised CA cannot mint a trusted substitute.
 //
 //       cloudflare    1.1.1.1, 1.0.0.1
-//       quad9         9.9.9.9, 149.112.112.112
 //       google        8.8.8.8, 8.8.4.4
 //       nextdns       45.90.28.0
-//       mullvad       194.242.2.2
 //
 // 2. Per cache-miss we shuffle the enabled resolver pool
-//    (Fisher-Yates over 5 entries, BCryptGenRandom) and try each
+//    (Fisher-Yates over the table, BCryptGenRandom) and try each
 //    pinned resolver in that random order until one succeeds. For
 //    each resolver, primary anycast IP is tried first; on TCP/TLS
 //    failure we fall back to the resolver's secondary IP if one is
@@ -54,7 +53,7 @@
 //    model below).
 //
 // 3. Hard fail. There is NO plain-DNS fallback. A network that blocks
-//    all 5 pinned resolvers simultaneously will push Lunar to INOP,
+//    all pinned resolvers simultaneously will push Lunar to INOP,
 //    which is the correct outcome -- we MUST NOT silently degrade to
 //    spoofable UDP/53 just because the secure path is unavailable.
 //    An attacker who could force such a fallback would have defeated
