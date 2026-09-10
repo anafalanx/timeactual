@@ -188,7 +188,8 @@ stayed local under `.tools/recovery-lab/`.
   build Tcl/Tk before moving a checkout, or move it to a path without spaces
   first. An upstream build-system limitation, not a Kuu defect.
 - **CI.** The checkpoint push succeeded in 7 min 34 s on windows-latest with
-  published Kuu 0.5. CI now pins the Kuu 0.6 release.
+  published Kuu 0.5. CI now pins the Kuu 0.6 release; the run for that
+  commit (ceef8d5) succeeded in 7 min 36 s, rebuilding Tcl/Tk on the runner.
 
 Two costs worth knowing. Repair works per destination: one damaged byte
 re-extracts the whole bundle, minutes for MSYS2. The first verification
