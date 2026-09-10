@@ -1,10 +1,12 @@
 global none
-global <const> require, assert, error, ipairs, print, tostring, table
+global <const> require, assert, error, ipairs, print, tostring, tonumber, table
 
 local rt, task, fs, proc = require 'rt', require 'task', require 'fs', require 'proc'
 local p, prereqs, build = require 'tools.project', require 'tools.prereqs', require 'tools.build'
-assert(rt.version == '0.5' or rt.version == '0.6', 'Time Actual requires Kuu 0.5 or 0.6; place kuu.exe in the project root')
-local legacy = rt.version == '0.5' -- Published CI runtime until 0.6 is released.
+local major, minor = rt.version:match('^(%d+)%.(%d+)$')
+assert(major and (tonumber(major) > 0 or tonumber(minor) >= 5),
+  'Time Actual requires Kuu 0.5 or newer (0.7 recommended); place kuu.exe in the project root')
+local legacy = rt.version == '0.5' -- Retained for projects still using the 0.5 release.
 
 task 'prereqs' {
   desc='Fetch pinned tools and build Tcl/Tk locally',
