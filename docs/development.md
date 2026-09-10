@@ -157,3 +157,40 @@ and concurrency. The full cold toolchain build and recovery/relocation run
 were paused before completion. Earlier adoption results above predate the
 new installer. See the [dated handoff](handoff-2026-09-10_193511.md) for the
 remaining work and local setup state; Step 2 is not complete.
+
+## Cold setup and recovery, second machine (2026-09-10)
+
+Run with the Kuu 0.6 build at its commit 9abab18, from fresh clones with an
+empty `.tools`, in normal Windows processes. Logs and the exercise script
+stayed local under `.tools/recovery-lab/`.
+
+- **Main checkout.** `prereqs --all` fetched all 27 pinned archives and built
+  Tcl/Tk 9.0.3 shared and static in 22 min 50 s. `env` verified gcc 16.2.0,
+  Python 3.14.6 and Tcl 9.0.3. The complete `test` task passed in 1 min 41 s:
+  9 task checks, 17 recovery checks, the build, 2,191 engine checks and the
+  application self-test with `status=ok`.
+- **Cold lab, a second clone.** 23 min 18 s to the same state. Then twelve
+  fault-injection and relocation steps passed: a changed byte in `ar.exe`
+  repaired from the cached archives without a download (445 s: the whole
+  MSYS2 destination is re-extracted and re-inventoried); a deleted Python
+  record rebuilt (8 s); a corrupt cached Python archive plus a missing
+  `python.exe` fetched again, verified and repaired (11 s); a deleted Tcl/Tk
+  record rebuilt in place (662 s); the checkout moved to a path with spaces
+  with the original path gone and the inherited tool variables replaced by
+  junk paths, after which `env`, reuse without downloads or unpacks, offline
+  repair from the cache, and the complete `test` task (69 s, every check as
+  above) all passed from the moved path.
+- **Tcl/Tk cannot be rebuilt from a path with spaces.** The thirteenth step
+  removed the Tcl/Tk record in the moved checkout: Tcl 9.0.3's
+  `win/configure` and Makefile split the path (`cd: too many arguments`,
+  `No rule to make target`). An installed Tcl/Tk keeps working from such a
+  path. `tools/tcltk.lua` now refuses the rebuild with that explanation:
+  build Tcl/Tk before moving a checkout, or move it to a path without spaces
+  first. An upstream build-system limitation, not a Kuu defect.
+- **CI.** The checkpoint push succeeded in 7 min 34 s on windows-latest with
+  published Kuu 0.5. CI now pins the Kuu 0.6 release.
+
+Two costs worth knowing. Repair works per destination: one damaged byte
+re-extracts the whole bundle, minutes for MSYS2. The first verification
+after a repair is slower (87 s against 5 to 10 s) because freshly written
+files are scanned on first read by the host's on-access scanner.

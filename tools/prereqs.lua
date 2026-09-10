@@ -51,8 +51,9 @@ function M.verify()
   for _,file in ipairs({p.gcc, p.ar, p.windres, p.tcl, p.tcls, p.wish, p.python}) do p.need(file) end
   print('root ' .. p.root)
   print(p.capture {p.gcc, '--version'}:match('[^\r\n]+'))
-  print(p.capture {p.python, '--version'}:gsub('%s+$', ''))
-  print(p.capture {p.tcl, stdin='puts "Tcl [info patchlevel]"\n'}:gsub('%s+$', ''))
+  -- gsub returns a count too; the parentheses keep it off the printed line
+  print((p.capture {p.python, '--version'}:gsub('%s+$', '')))
+  print((p.capture {p.tcl, stdin='puts "Tcl [info patchlevel]"\n'}:gsub('%s+$', '')))
 end
 
 return M

@@ -1,5 +1,5 @@
 global none
-global <const> require, assert, ipairs, print, table, tostring
+global <const> require, assert, error, ipairs, print, table, tostring
 
 local fs, hash = require 'fs', require 'hash'
 local p = require 'tools.project'
@@ -26,6 +26,15 @@ function M.ensure(packages)
   local ready = install.ready('.tools/tcltk', fingerprint)
   for _,file in ipairs(needed) do if fs.exists(file) ~= 'file' then ready = false end end
   if ready then return end
+  -- Tcl 9.0.3 configure and its Makefile split a source or prefix path at a
+  -- space ("cd: too many arguments"), so a rebuild from such a path cannot
+  -- succeed. An installed Tcl/Tk keeps working from any path; only the
+  -- rebuild is refused, with the reason and the way out.
+  if p.root:find(' ', 1, true) then
+    error(require('err').new('PREREQS', 'path', 'Tcl/Tk 9.0.3 cannot be built from a path containing a space ('
+      .. p.root .. '): its configure and Makefile split the path. Build it from a path without spaces, '
+      .. 'or move the checkout only after .tools/tcltk exists.'), 0)
+  end
   -- A failed or interrupted build must never retain a completion record.
   if fs.exists('.tools/tcltk/.kuu-installed.json') then p.remove('.tools/tcltk/.kuu-installed.json') end
   local bash = p.path('.tools/msys2/usr/bin/bash.exe')
