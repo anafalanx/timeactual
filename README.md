@@ -15,33 +15,43 @@ lies, and it never goes dark just because the network did.
 The version is single-sourced from the top-level [`VERSION`](VERSION) file;
 the build injects it into the exe's version resource and `build/version.h`.
 
-## Build
+## Build and develop
 
-The shipped product is the Tcl/Tk shell. Building it needs:
+Copy **Kuu 0.5 or 0.6** (`kuu.exe`) directly into this repository's root, beside
+`tasks.lua`. That is the only tool to supply manually. Use Windows x64 with
+network access for the first setup:
 
-- **MSYS2 UCRT64** with `gcc`, `windres`, and Python:
+```powershell
+.\kuu.exe run prereqs       # fetch pinned tools and build Tcl/Tk locally
+.\kuu.exe run test          # build the app, run C tests, self-test the exe
+.\kuu.exe list              # every task and its arguments
+```
 
-      pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-python
+Kuu installs nothing on the machine. Every downloaded archive is pinned by
+SHA-256 in `tools/prereqs.json`; tools, caches and temporary files live in
+`.tools/`. The compiler, Python, and both shared and static Tcl/Tk 9.0.3 are
+private to this checkout. Build commands use explicit paths and replace the
+inherited tool search path. No workspace manager or adjacent repository is
+required. Subsequent builds use the local tools without network access.
 
-- A **static Tcl/Tk 9** build (headers + static `.a`s). Time Actual links it
-  in so the exe has no external Tcl/Tk dependency. `tools/tasks.tcl`
-  discovers it under the z workspace layout (`r/tcltk/9.0.3`) or from the
-  `Z_TCLTK` environment variable.
+```powershell
+.\kuu.exe run build         # dist/TimeActual.exe and its SHA-256
+.\kuu.exe run unit          # C engine unit tests
+.\kuu.exe run check         # isolated application self-test
+.\kuu.exe run repackage     # fast Tcl/UI-only rebuild
+.\kuu.exe run run           # run the app; Ctrl-C stops it
+.\kuu.exe run run --dev     # run lunar.tcl under the local wish
+.\kuu.exe run uishot build/ui.png trusted
+.\kuu.exe run sign          # local SDK tool; requires an active SimplySign session
+.\kuu.exe run clean         # remove build/ and dist/, keep tools
+```
 
-From the project root, run the build task with the static `tclsh`:
-
-    tclsh90.exe tools/tasks.tcl build
-
-`scripts/build.py` is invoked by the build to compile the vendored
-mbedTLS archive and generate `build/version.h`; it is no longer a
-standalone exe builder. Other tasks: `check` (headless self-test),
-`shot <png>` (occlusion-proof screenshot), `sign` (Authenticode via the
-Certum flow), `repackage` (re-zip `lunar.tcl` onto the bare exe without
-recompiling — fast for Tcl-only edits).
-
-Output:
-
-- `dist/TimeActual.exe` — the app binary, a single self-contained exe.
+The default task is `test`. Add `--json` before a task name for a
+machine-readable outcome, or `--dry-run` to inspect its dependency plan.
+`kuu.exe check` checks Lua syntax/imports; `kuu.exe list` also validates the
+task declarations. See [development notes](docs/development.md) for setup,
+optional tools, testing, and CI, and [distribution](docs/distribution.md)
+for release signing.
 
 ## Run
 
@@ -55,7 +65,9 @@ zipfs image, and the C engine (libgcc + mbedTLS) is archived in.
                  #   lunar_main.c (entry point), lunarx.c (::lunar::*),
                  #   lunarclock.c (Direct2D clock widget), cap.c (screenshots)
     lunar.tcl    # the Tk UI chrome: analog face, status bar, Settings, event log
-    tools/       # Tcl build tooling (tasks/genres/package/shot/mkico)
+    kuu.exe      # project-local Kuu runtime (ignored by Git)
+    tasks.lua    # build, tests, packaging, run, screenshots, signing, codegen
+    tools/       # Kuu modules, pinned prerequisites, Tcl packaging/rendering helpers
     assets/      # icons, fonts
     scripts/     # Build/codegen helpers: build.py (mbedTLS archive + version.h),
                  #   gen_tz_embed.py, gen_win_tzmap.go, probe_nts.py

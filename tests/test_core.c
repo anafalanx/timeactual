@@ -2,7 +2,7 @@
 //
 // Exercises the engine libraries directly through their public headers;
 // the .c files under test are linked in by tests/run_tests.py. The UI
-// shell is Tcl/Tk (lunar.tcl) and is covered separately via `z check`.
+// shell is Tcl/Tk (lunar.tcl) and is covered separately via `kuu.exe run check`.
 
 #include "../src/clock.h"
 #include "../src/ntp.h"

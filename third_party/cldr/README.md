@@ -34,19 +34,13 @@ is repo source, kept for reproducible builds.
 
 ## Refresh procedure (release-time, when CLDR/tzdata updates)
 
-1. Re-fetch the file and update the pinned commit + date above:
+1. Choose and record an upstream CLDR commit. Use Kuu's `http` module to
+   retrieve `common/supplemental/windowsZones.xml` from that exact commit
+   under `https://raw.githubusercontent.com/unicode-org/cldr/`. Review the
+   diff and record its SHA-256, commit, and retrieval date above.
+2. Regenerate the table from the repo root, after any timezone-data bump:
 
-       curl -sS -o third_party/cldr/windowsZones.xml \
-         https://raw.githubusercontent.com/unicode-org/cldr/main/common/supplemental/windowsZones.xml
-       C:/dev/.z/r/gh/bin/gh.exe api \
-         "repos/unicode-org/cldr/commits?path=common/supplemental/windowsZones.xml&per_page=1" \
-         --jq '.[0].sha'
+       .\kuu.exe run gen-win-tzmap
 
-2. Regenerate the table (run from the repo root, after any tzdata bump so
-   the embedded-zone filter is current):
-
-       z go run scripts/gen_win_tzmap.go
-
-3. Rebuild, run the tests (they assert every mapped IANA name resolves in
-   the embedded index), and commit the XML + regenerated
-   `src/tz_winmap_gen.c` together.
+3. Run `.\kuu.exe run test` and commit the reviewed XML and generated C
+   table together. No global Go, GitHub CLI, or workspace manager is needed.

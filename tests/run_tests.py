@@ -2,7 +2,7 @@
 
 Usage (from project root):
 
-    .venv\\Scripts\\python.exe tests/run_tests.py
+    .\\kuu.exe run unit
 
 Compiles tests/test_core.c against src/*.c in a separate object set
 (without -mwindows so we have a console main) and runs the resulting

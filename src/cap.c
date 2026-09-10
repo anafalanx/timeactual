@@ -7,7 +7,7 @@
  * as a Tcl byte array, which tools/shot.tcl turns into a PNG via dib_to_photo.
  *
  * Ported verbatim from els/src/cap.c (namespace elscap -> lunarcap).
- * C23 + Tcl stubs; links user32 + gdi32. Built by `z build-ext`.
+ * C23 + Tcl stubs; links user32 + gdi32. Built by `kuu.exe run build-ext`.
  */
 #include <tcl.h>
 #define WIN32_LEAN_AND_MEAN

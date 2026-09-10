@@ -4,29 +4,39 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: windows-latest
-
+    timeout-minutes: 45
     defaults:
       run:
-        shell: msys2 {0}
-
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-python
+      # CI supplies the one file developers copy into the project root.
+      - name: Place pinned Kuu in the project root
+        run: |
+          Invoke-WebRequest -Uri 'https://github.com/anafalanx/kuu/releases/download/0.5/kuu.exe' -OutFile kuu.exe
+          $expected = 'f5f1c8fecd8295ea3ffcc0f3386d0ff7927d27c590a841f454cc9f7f1b022e93'
+          if ((Get-FileHash -LiteralPath kuu.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'Kuu checksum mismatch'
+          }
 
-      # The shipped product is the Tcl/Tk shell (see tools/tasks.tcl), which
-      # links a static Tcl/Tk 9 payload that isn't available on hosted
-      # runners -- so CI can't produce the exe. It exercises what it can:
-      # run_tests.py compiles the vendored mbedTLS archive and the full C
-      # engine from source, then runs the unit-test suite against it.
-      - name: Engine unit tests
-        run: python tests/run_tests.py
+      - uses: actions/cache@v4
+        with:
+          path: .tools
+          key: timeactual-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/prereqs.json', 'tools/prereqs.lua', 'tools/install.lua', 'tools/project.lua', 'tools/tcltk.lua') }}
+
+      - name: Validate task declarations
+        run: |
+          .\kuu.exe check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\kuu.exe list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and test the complete application
+        run: .\kuu.exe run test

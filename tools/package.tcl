@@ -7,36 +7,15 @@
 #
 #   tclsh90s.exe tools/package.tcl [out.exe] [--wrapper W]
 #
-# Ported verbatim from els/tools/package.tcl (Lunar uses the same z shared
-# Tcl/Tk 9 payload at <z>/.z/r/tcltk/9.0.3).
+# The Tcl/Tk payload is built locally by kuu.exe run prereqs.
 
 proc script_root {} {
     set s [info script]
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-proc zmal_paths {root args} {
-    set out {}
-    if {[info exists ::env(Z_HOME)] && $::env(Z_HOME) ne ""} {
-        lappend out [file join $::env(Z_HOME) {*}$args]
-    } elseif {[info exists ::env(Z_ROOT)] && $::env(Z_ROOT) ne ""} {
-        lappend out [file join $::env(Z_ROOT) .z {*}$args]
-    }
-    lappend out [file join [file dirname $root] .z {*}$args]
-    return $out
-}
-proc discover_tcltk {root} {
-    set cands {}
-    if {[info exists ::env(Z_TCLTK)] && $::env(Z_TCLTK) ne ""} { lappend cands $::env(Z_TCLTK) }
-    lappend cands {*}[zmal_paths $root r tcltk 9.0.3]
-    foreach p $cands {
-        set p [file normalize $p]
-        if {[file exists [file join $p tcl9 bin tclsh90.exe]]} { return $p }
-    }
-    error "z Tcl/Tk payload not found (r/tcltk/9.0.3) - restore z's runtime payloads"
-}
 set ROOT [script_root]
-set TC   [discover_tcltk $ROOT]
+set TC   [file join $ROOT .tools tcltk]
 proc TCp {args} { return [file join $::TC {*}$args] }
 
 proc copy_tree {src dst} {
@@ -80,8 +59,8 @@ if {![file exists $wish]} { error "static wish missing: $wish" }
 if {$wrapperOverride ne ""} { set mkimgWrapper $wrapperOverride } else { set mkimgWrapper $wish }
 if {[file isdirectory //zipfs:/app/tcl_library]} {
     set tclLibrary //zipfs:/app/tcl_library
-} elseif {[file isdirectory [TCp tcllib tcl_library]]} {
-    set tclLibrary [TCp tcllib tcl_library]
+} elseif {[file isdirectory [TCp tcl9 lib tcl9.0]]} {
+    set tclLibrary [TCp tcl9 lib tcl9.0]
 } else {
     error "tcl_library not found in //zipfs:/app or the bundle's tcllib"
 }
@@ -100,8 +79,8 @@ if {![catch {zipfs mount $wish Wt}]} {
     }
     zipfs unmount Wt
 }
-if {!$copiedTk && [file isdirectory [TCp tcllib tk_library]]} {
-    copy_tree [TCp tcllib tk_library] [file join $stage tk_library]
+if {!$copiedTk && [file isdirectory [TCp tcl9 lib tk9.0]]} {
+    copy_tree [TCp tcl9 lib tk9.0] [file join $stage tk_library]
     set copiedTk 1
 }
 if {!$copiedTk} { error "tk_library not found in wish90s.exe or the bundle's tcllib" }

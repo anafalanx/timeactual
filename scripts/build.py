@@ -5,12 +5,12 @@ Usage (from project root):
     python scripts/build.py
 
 This used to build the native Direct2D `Lunar.exe`. Since 0.50 the product
-is the Tcl/Tk shell, built by `tools/tasks.tcl` (`z build`), which reuses
+is the Tcl/Tk shell, built by `kuu.exe run build`, which reuses
 the two helpers here: `build_mbedtls_archive()` compiles the vendored
 mbedTLS 3.6.6 sources into a hash-cached static archive, and
 `write_version_header()` renders `build/version.h` from the top-level
 VERSION file. `tests/run_tests.py` imports the same helpers for the C unit
-tests. Requires MSYS2 UCRT64 with `gcc` and `ar`.
+tests. Uses only the compiler installed by `kuu.exe run prereqs`.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 VERSION_FILE = ROOT / "VERSION"
-DEFAULT_MSYS2_DIR = Path(r"C:\msys64")
+TOOL_BIN = ROOT / ".tools" / "msys2" / "ucrt64" / "bin"
 
 # Vendored mbedTLS 3.6.6 LTS. Produced from an upstream tarball whose
 # SHA-256 we checked against the release page before committing the
@@ -58,42 +58,12 @@ def run(*args: str | os.PathLike) -> None:
         die(f"command failed (exit {rc}): {cmd[0]}")
 
 
-def _msys2_ucrt_bin(msys2_dir: Path) -> Path:
-    return msys2_dir / "ucrt64" / "bin"
-
-
-def _prepend_path(path: Path) -> None:
-    os.environ["PATH"] = f"{path};{os.environ.get('PATH', '')}"
-
-
 def find_tool(name: str) -> Path:
-    """Locate a tool on PATH, MSYS2_DIR, or the default MSYS2 UCRT64 bin dir."""
-    found = shutil.which(name)
-    if found:
-        return Path(found)
-
-    bins: list[tuple[str, Path]] = []
-    override = os.environ.get("MSYS2_DIR")
-    if override:
-        bins.append(("MSYS2_DIR", _msys2_ucrt_bin(Path(override).expanduser())))
-    bins.append(("default", _msys2_ucrt_bin(DEFAULT_MSYS2_DIR)))
-
-    checked: list[str] = []
-    seen: set[Path] = set()
-    for label, bin_dir in bins:
-        bin_dir = bin_dir.resolve(strict=False)
-        if bin_dir in seen:
-            continue
-        seen.add(bin_dir)
-        checked.append(f"{label} {bin_dir}")
-        for ext in (".exe", ""):
-            candidate = bin_dir / f"{name}{ext}"
-            if candidate.is_file():
-                # Prepend UCRT bin so child processes can find sibling tools too.
-                _prepend_path(bin_dir)
-                return candidate
-
-    die(f"{name} not found on PATH, MSYS2_DIR, or fallback ({'; '.join(checked)})")
+    """Return a tool from this checkout; never discover another installation."""
+    candidate = TOOL_BIN / f"{name}.exe"
+    if candidate.is_file():
+        return candidate
+    die(f"{candidate} is missing; run .\\kuu.exe run prereqs")
     raise SystemExit  # unreachable; keeps type checkers happy
 
 
@@ -123,7 +93,7 @@ def write_version_header(build_dir: Path = BUILD,
                          version: str | None = None) -> Path:
     """Generate <build_dir>/version.h from the VERSION file.
 
-    Standalone (no other build state needed) so tools/tasks.tcl and
+    Standalone (no other build state needed) so the Kuu task runner and
     tests/run_tests.py can both reuse it. Only rewrites the file when the
     content changes, to keep mtimes stable for caching.
     """
@@ -171,6 +141,10 @@ def _mbedtls_cache_key() -> str:
     is invalidated and rebuilt. Cheap to compute (a few MB of SHA-256).
     """
     h = hashlib.sha256()
+    # A compiler or recipe change must invalidate the native archive too.
+    h.update(Path(__file__).read_bytes())
+    h.update((ROOT / "tools" / "prereqs.json").read_bytes())
+    h.update(find_tool("gcc").read_bytes())
     inputs = sorted([
         MBEDTLS_CONFIG,
         *(MBEDTLS_DIR / "include").rglob("*.h"),
@@ -282,7 +256,7 @@ def build_mbedtls_archive(gcc: Path) -> Path:
 # ---- main ------------------------------------------------------------------
 #
 # Standalone entry point: render version.h and (re)build the mbedTLS
-# archive. The Tk exe itself is built by tools/tasks.tcl, which calls the
+# archive. The Tk exe itself is built by tasks.lua, which calls the
 # same two helpers; this main() exists so the prerequisites can be primed
 # (or cache-warmed) from the command line.
 

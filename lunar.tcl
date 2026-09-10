@@ -947,7 +947,7 @@ proc lunar::build {} {
     wm resizable . 1 1
     lunar::init_style
     . configure -background $::lunar::PAGE
-    # Window icon: the sizes `z icon` renders, so the title bar gets a real
+    # Window icon: the sizes `kuu.exe run icon` renders, so the title bar gets a real
     # 16 px image and the taskbar a real 32 px one instead of a scaled 256.
     catch {
         set rd [file join [file dirname [info script]] resources]

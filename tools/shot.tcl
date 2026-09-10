@@ -11,8 +11,7 @@
 #   tclsh90.exe tools/shot.tcl --selftest        ;# headless converter checks
 #
 # Set LUNAR_SHOT_TITLE to capture a specific toplevel/dialog by title.
-# Requires build/cap.dll (`z build-ext`). twapi is provided on auto_path by
-# tools/tasks.tcl (or via the Z_TWAPI env var when run directly).
+# Requires build/cap.dll (`kuu.exe run build-ext`) and the project-local TWAPI.
 
 package require Tk
 wm withdraw .
@@ -23,11 +22,7 @@ proc script_root {} {
     return [file dirname [file dirname $s]]
 }
 set ::SHOT_ROOT [script_root]
-# twapi is normally on auto_path already (tasks.tcl exports TCLLIBPATH). When
-# shot.tcl is run standalone, honor Z_TWAPI.
-if {[info exists ::env(Z_TWAPI)] && $::env(Z_TWAPI) ne ""} {
-    lappend auto_path $::env(Z_TWAPI)
-}
+lappend auto_path [file join $::SHOT_ROOT .tools twapi]
 
 # ---- DIB (BITMAPINFOHEADER) -> Tk photo ---------------------------------
 proc dib_to_photo {dib} {

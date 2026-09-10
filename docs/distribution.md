@@ -50,12 +50,12 @@ Steps to sign a release:
 
 ### The `sign` build task
 
-`tools/tasks.tcl sign` (aka `z sign`) runs the §1 `signtool` command on
+`.\kuu.exe run sign` runs the §1 `signtool` command on
 `dist/TimeActual.exe` and then verifies it with `signtool verify /pa`, so a
 release sign-off is a single task. SimplySign Desktop must be connected
 first (so the cert is available to `signtool /a`). Authenticode appends
 its certificate table at the end of the file, beside the appended zipfs
-image, so re-run `tools/tasks.tcl check` on the signed exe afterwards to
+image, so re-run `.\kuu.exe run check` on the signed exe afterwards to
 confirm it still loads (status must stay `ok`).
 
 ## 2. Release checklist
@@ -64,14 +64,13 @@ confirm it still loads (status must stay `ok`).
    exe's four-part Windows resource fields are this padded with zeros).
 2. **Regenerate tzdata if stale** — check IANA for a newer release than
    the embedded one (`src/tz_embed.c`) and regenerate if so.
-3. **Build**: `tclsh90.exe tools/tasks.tcl build` (needs the static
+3. **Build**: `.\kuu.exe run build` (needs the static
    Tcl/Tk 9 payload — see the README Build section). Produces
    `dist/TimeActual.exe`.
-4. **Test**: `python tests/run_tests.py` (C engine unit tests) and
-   `tclsh90.exe tools/tasks.tcl check` (headless self-test of the built
+4. **Test**: `.\kuu.exe run unit` (C engine unit tests) and
+   `.\kuu.exe run check` (headless self-test of the built
    exe). Both must be green — CI must also be green on the release commit.
-5. **Sign + verify**: connect SimplySign, then `tclsh90.exe
-   tools/tasks.tcl sign` (or the §1 `signtool` command) on
+5. **Sign + verify**: connect SimplySign, then `.\kuu.exe run sign` (or the §1 `signtool` command) on
    `dist/TimeActual.exe`, and verify it. Note the printed SHA-256 of the
    signed exe.
 6. **GitHub Release**: tag `vX.Y` (matching VERSION), upload the signed

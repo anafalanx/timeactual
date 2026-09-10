@@ -2,7 +2,7 @@
 # for screenshot-based UI review, so the layout can be evaluated without a live
 # network sync. Driven by shot.tcl, which launches wish on this script:
 #
-#   z uishot <out.png> ?state?
+#   kuu.exe run uishot <out.png> ?state?
 #   tools/shot.tcl <wish> tools/uishot.tcl <out.png> ?state?
 #
 # ?state?: trusted (default) | degraded | wide | stopped | acquiring --

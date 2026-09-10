@@ -29,27 +29,16 @@ Only what `gen_tz_embed.py` consumes (not the full ~4.7 MB tree):
 
 ## Refresh procedure (release-time, when tzdata updates)
 
-1. Update the MSYS2 package:
+1. Review the timezone-data version pinned in `tools/prereqs.json`. Update
+   its archive URL and SHA-256 when adopting a newer upstream package,
+   then run `.\kuu.exe run prereqs`.
+2. Copy the consumed subset from the checkout's
+   `.tools/msys2/ucrt64/share/zoneinfo` into this directory: the zones in
+   `zone1970.tab`, `UTC`, `Etc/UTC`, the tab files listed above, and
+   `tzdata.zi`. Use Kuu's `fs` operations; no shared installation is involved.
+   Review removed and renamed zones as well as new ones.
+3. Run `.\kuu.exe run gen-tz`, then `.\kuu.exe run gen-win-tzmap`.
+4. Update the version/date above, run `.\kuu.exe run test`, and commit the
+   vendored snapshot and generated C files together.
 
-       pacman -S tzdata
-
-2. Re-copy the consumed subset into this directory. From an MSYS2
-   shell at the repo root:
-
-       DEST=$(pwd)/third_party/tzdata/zoneinfo
-       rm -rf "$DEST" && mkdir -p "$DEST"
-       cd /c/msys64/usr/share/zoneinfo
-       cp --parents $(awk -F'\t' '!/^#/ && NF>=3 {print $3}' zone1970.tab | sort -u) \
-          UTC Etc/UTC zone1970.tab zone.tab iso3166.tab zonenow.tab tzdata.zi \
-          "$DEST/"
-
-   (Or copy the whole tree and prune; the generator ignores files it
-   doesn't consume, but keeping the subset small keeps review easy.)
-
-3. Regenerate the embedded snapshot:
-
-       C:\msys64\ucrt64\bin\python.exe scripts\gen_tz_embed.py
-
-4. Update the version and date at the top of this file, rebuild, run
-   the tests, and commit the vendored tree + regenerated
-   `src/tz_embed.c` together as one commit ("Bump tzdata to 20XXx").
+The source path above records the historical import, not a build dependency.

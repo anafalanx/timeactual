@@ -1,12 +1,12 @@
 #!/usr/bin/env tclsh
 # tools/icon.tcl -- render the application icon from a palette and a few
 # numbers, so the colours change by editing one block (or passing flags) and
-# rerunning `z icon`. Pure Tcl: a signed-distance rasteriser with one-pixel
+# rerunning `kuu.exe run icon`. Pure Tcl: a signed-distance rasteriser with one-pixel
 # anti-aliasing, size-dependent simplification (the minute track, the twelve
 # hour ticks and the inner ring drop out where they would no longer fit), a
 # PNG encoder and an ICO packer. No Tk, no external tools.
 #
-#   z icon ?--face #hex? ?--ink #hex? ?--accent #hex?
+#   kuu.exe run icon ?--face #hex? ?--ink #hex? ?--accent #hex?
 #       -> assets/icon.ico (16..256) + assets/icon.png (256 preview)
 #          + build/icon/*.png (every size, plus nearest-neighbour blow-ups
 #            of the small ones for checking the pixel fit)
