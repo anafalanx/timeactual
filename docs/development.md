@@ -226,3 +226,8 @@ nothing here: `fs.dirs` now reports pruned directories in a separate
 the performance counter, which the setup tests use only for differences.
 Its `fs.write` rename retry is a pure improvement for the installer's atomic
 writes.
+
+CI passed for that commit (run 34602972202) in 1 min 19 s on windows-latest:
+the pinned 0.9.0 download verified against its checksum, the `.tools` cache
+hit so Tcl/Tk was not rebuilt, then 9 task checks, 17 recovery checks, the
+6,429,232-byte build, 2,191 engine checks, and the self-test at `status=ok`.
