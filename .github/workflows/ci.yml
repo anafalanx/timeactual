@@ -20,8 +20,8 @@ jobs:
       # CI supplies the one file developers copy into the project root.
       - name: Place pinned Kuu in the project root
         run: |
-          Invoke-WebRequest -Uri 'https://github.com/anafalanx/kuu/releases/download/0.7/kuu.exe' -OutFile kuu.exe
-          $expected = 'd81dec499ec76631965288335cfce896d1443b31bf1be0ca5a58f94fc40deab4'
+          Invoke-WebRequest -Uri 'https://github.com/anafalanx/kuu/releases/download/0.9.0/kuu.exe' -OutFile kuu.exe
+          $expected = '5348fb46f934a637081117159eeb9b98a639a848b408b2ffb392d85f4c0a1f55'
           if ((Get-FileHash -LiteralPath kuu.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
             throw 'Kuu checksum mismatch'
           }

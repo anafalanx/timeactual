@@ -17,7 +17,7 @@ the build injects it into the exe's version resource and `build/version.h`.
 
 ## Build and develop
 
-Copy **Kuu 0.7** (`kuu.exe`, minimum 0.5) directly into this repository's root, beside
+Copy **Kuu 0.9.0** (`kuu.exe`) directly into this repository's root, beside
 `tasks.lua`. That is the only tool to supply manually. Use Windows x64 with
 network access for the first setup:
 

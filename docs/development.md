@@ -7,8 +7,8 @@ is discovered in an adjacent checkout or inherited developer-tool directory.
 
 ## First setup
 
-1. Copy the published [Kuu 0.5](https://github.com/anafalanx/kuu/releases/tag/0.5)
-   or a local Kuu 0.6 build into the project root.
+1. Copy the published [Kuu 0.9.0](https://github.com/anafalanx/kuu/releases/tag/0.9.0)
+   into the project root, after checking its SHA-256 against the release.
 2. Run `.\kuu.exe run prereqs` with network access.
 3. Run `.\kuu.exe run test`.
 
@@ -100,7 +100,7 @@ provision the tasks you need first (`prereqs --all` covers every optional tool).
 
 ## CI
 
-CI downloads the published Kuu 0.5 executable into the checkout root, verifies
+CI downloads the published Kuu 0.9.0 executable into the checkout root, verifies
 its pinned SHA-256, then runs the same Kuu commands as development. It builds
 Tcl/Tk and the entire application, including engine tests and the application
 self-test. It caches the checkout's `.tools/` under a key derived from the
@@ -195,3 +195,34 @@ Two costs worth knowing. Repair works per destination: one damaged byte
 re-extracts the whole bundle, minutes for MSYS2. The first verification
 after a repair is slower (87 s against 5 to 10 s) because freshly written
 files are scanned on first read by the host's on-access scanner.
+
+## Kuu 0.9.0 adoption (2026-09-11)
+
+Kuu 0.9.0 is the last release before its 1.0 freeze, and it is the first with
+a three-component version. That breaks the minimum-version guard this project
+carried, which matched `^(%d+)%.(%d+)$` and therefore refused `0.9.0` before
+any task ran. The guard now calls `rt.version_at_least(0, 9)`, which compares
+numbers and never parses the version text; on an older runtime the function is
+absent, which is itself the answer.
+
+The minimum rose from 0.5 to 0.9.0, so the two compatibility branches this
+recipe carried are gone: the `check` deadline no longer switches its `min`
+between milliseconds and seconds, and the aggregate `test` task no longer
+needs an empty `run`. Keeping 0.5 was in any case no longer a kindness, since
+the published 0.7 executable cannot start on Windows 11 23H2.
+
+CI now pins the 0.9.0 release, SHA-256
+`5348fb46f934a637081117159eeb9b98a639a848b408b2ffb392d85f4c0a1f55`.
+
+Verified on Windows 11 25H2 build 26200.6899 with the downloaded signed
+release, whose digest matches the pin: `kuu check` reported 8 files with no
+errors or warnings, and the complete `test` task passed in 3 min 22 s — 9 task
+checks, 17 setup-recovery checks, the build, 2,191 engine checks, and the
+packaged application self-test at `status=ok`.
+
+Two Kuu 0.9.0 contract changes were checked against this project and touch
+nothing here: `fs.dirs` now reports pruned directories in a separate
+`skipped` array, which these recipes never walk, and `sched.clock` moved to
+the performance counter, which the setup tests use only for differences.
+Its `fs.write` rename retry is a pure improvement for the installer's atomic
+writes.

@@ -1,12 +1,15 @@
 global none
-global <const> require, assert, error, ipairs, print, tostring, tonumber, table
+global <const> require, assert, error, ipairs, print, tostring, table
 
 local rt, task, fs, proc = require 'rt', require 'task', require 'fs', require 'proc'
 local p, prereqs, build = require 'tools.project', require 'tools.prereqs', require 'tools.build'
-local major, minor = rt.version:match('^(%d+)%.(%d+)$')
-assert(major and (tonumber(major) > 0 or tonumber(minor) >= 5),
-  'Time Actual requires Kuu 0.5 or newer (0.7 recommended); place kuu.exe in the project root')
-local legacy = rt.version == '0.5' -- Retained for projects still using the 0.5 release.
+-- Kuu 0.9.0 gave the version a third component, which no pattern over
+-- rt.version matches; version_at_least compares the numbers instead, and its
+-- absence is itself the answer on an older runtime. 0.9.0 is the minimum
+-- because the published 0.7 cannot start on Windows 11 23H2, and the
+-- compatibility branches this recipe carried for 0.5 go with it.
+assert(rt.version_at_least and rt.version_at_least(0, 9),
+  'Time Actual requires Kuu 0.9.0 or newer; place a current kuu.exe in the project root')
 
 task 'prereqs' {
   desc='Fetch pinned tools and build Tcl/Tk locally',
@@ -26,10 +29,10 @@ task 'unit' {desc='Compile and run C engine unit tests', deps={'prereqs'}, run=b
 task 'check' {
   desc='Self-test an existing application in an isolated data directory',
   args={{'exe', type='string', help='Executable, default dist/TimeActual.exe'},
-    {'--timeout', type='duration', default='90s', min=legacy and 1 or 0.001, help='Self-test deadline'}}, run=build.check,
+    {'--timeout', type='duration', default='90s', min=0.001, help='Self-test deadline'}}, run=build.check,
 }
-task 'test' {desc='Build and run task, setup recovery, engine and application tests', deps={'test-tasks', 'test-prereqs', 'build', 'unit', 'check'},
-  run=legacy and function() end or nil}
+task 'test' {desc='Build and run task, setup recovery, engine and application tests',
+  deps={'test-tasks', 'test-prereqs', 'build', 'unit', 'check'}}
 task 'test-tasks' {
   desc='Test task failures, deadlines, JSON output, and environment isolation', deps={'prereqs'},
   run=function()
